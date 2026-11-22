@@ -30,6 +30,10 @@ def _defaults():
     jtc.setdefault("rooms", {})         # {channel_id: {guild, owner, waiting, card}}
     jtc.setdefault("waiting", {})       # {waiting_channel_id: room_channel_id}
     jtc.setdefault("profiles", {})      # {"guild:user": {trusted, blocked, prefs}} - a room owner's saved lists
+    trusted = data.get("trusted", [])
+    if not isinstance(trusted, list):
+        trusted = []
+    data["trusted"] = list(dict.fromkeys(int(uid) for uid in trusted if str(uid).strip().isdigit()))
 
 
 def load_data():
@@ -72,6 +76,10 @@ def is_owner(user_id):
 
 
 def is_trusted(user_id):
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        return False
     return user_id in data["trusted"]
 
 
