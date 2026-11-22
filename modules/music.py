@@ -7,6 +7,7 @@ import collections
 import json
 import random
 import re
+import shlex
 import time
 import urllib.error
 import urllib.parse
@@ -236,12 +237,13 @@ def apple_tracks(url):
 
 # ======================= tracks =======================
 class Track:
-    def __init__(self, title, query, requester, stream_url=None, duration=None, page=None, thumb=None):
+    def __init__(self, title, query, requester, stream_url=None, duration=None, page=None, thumb=None, http_headers=None):
         self.title = title
         self.thumb = thumb
         self.query = query
         self.requester = requester
         self.stream_url = stream_url
+        self.http_headers = http_headers or {}
         self.duration = duration
         self.page = page
         self.resolved_at = time.time() if stream_url else 0
@@ -251,7 +253,7 @@ class Track:
         page = info.get("webpage_url") or info.get("original_url")
         return cls(info.get("title") or "Unknown", page or info.get("url"), requester,
                    stream_url=info.get("url"), duration=info.get("duration"), page=page,
-                   thumb=info.get("thumbnail"))
+                   thumb=info.get("thumbnail"), http_headers=info.get("http_headers"))
 
     async def ensure_stream(self):
         if self.stream_url and time.time() - self.resolved_at < 1200:
@@ -264,6 +266,7 @@ class Track:
         if not info.get("url"):
             raise MusicError("Could not get an audio stream.")
         self.stream_url = info["url"]
+        self.http_headers = info.get("http_headers") or {}
         self.resolved_at = time.time()
         self.duration = self.duration or info.get("duration")
         self.page = self.page or info.get("webpage_url")
@@ -457,10 +460,17 @@ class GuildPlayer:
                 self.skipped = False
                 self.next_event.clear()
                 try:
+                    header_blob = "\\r\\n".join(
+                        f"{key}: {value}" for key, value in track.http_headers.items()
+                        if key and value
+                    )
+                    before_options = FFMPEG_BEFORE
+                    if header_blob:
+                        before_options += f" -headers {shlex.quote(header_blob + chr(92) + "r" + chr(92) + "n")}"
                     source = discord.PCMVolumeTransformer(
                         discord.FFmpegPCMAudio(
                             track.stream_url,
-                            before_options=FFMPEG_BEFORE,
+                            before_options=before_options,
                             options=FFMPEG_OPTS,
                         ),
                         volume=self.volume,
