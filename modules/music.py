@@ -33,7 +33,10 @@ YTDL_OPTS = {
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    "default_search": "auto",
+    "socket_timeout": 20,
+    "retries": 2,
+    "fragment_retries": 2,
+    "extractor_retries": 2,
     "playlistend": config.MAX_QUEUE,
 }
 STAY_GRACE = 45        # seconds a connection may stay down before the 24/7 watchdog steps in
@@ -97,59 +100,56 @@ def np_embed(p, track):
 
 
 # ======================= sources =======================
+def _host(query):
+    try:
+        return (urllib.parse.urlsplit(query).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _is_youtube_url(query):
+    host = _host(query)
+    return (host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
+            or host == "youtube-nocookie.com" or host.endswith(".youtube-nocookie.com"))
+
+
+def _is_soundcloud_url(query):
+    host = _host(query)
+    return host == "soundcloud.com" or host.endswith(".soundcloud.com")
+
+
 def extract(query, flat=False):
-    """Extract metadata, retrying without cookies when YouTube rejects them."""
+    """Extract track metadata and streams without using YouTube or browser cookies."""
     base = dict(YTDL_OPTS)
+    if query.lower().startswith("scsearch") or _is_soundcloud_url(query):
+        # SoundCloud's anti-bot edge may reject generic HTTP fingerprints.
+        # yt-dlp's SoundCloud extractor uses this when curl-cffi is installed.
+        base["impersonate"] = "chrome"
     if flat:
         base.update(extract_flat="in_playlist", noplaylist=False)
 
-    attempts = []
-    if config.YTDL_COOKIEFILE:
-        with_cookies = dict(base)
-        with_cookies["cookiefile"] = config.YTDL_COOKIEFILE
-        attempts.append(with_cookies)
-    # A stale/partially exported cookie file can make YouTube return 403 for
-    # search itself. Keep search usable by retrying as an anonymous request.
-    attempts.append(base)
-
-    last_error = None
-    cookie_error = None
-    for opts in attempts:
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(query, download=False)
-        except OSError as e:
-            if "File name too long" in str(e):
+    try:
+        with yt_dlp.YoutubeDL(base) as ydl:
+            return ydl.extract_info(query, download=False)
+    except (OSError, yt_dlp.utils.DownloadError) as e:
+        msg = str(e).replace("ERROR: ", "").splitlines()[0].strip() or type(e).__name__
+        low = msg.lower()
+        soundcloud = query.lower().startswith("scsearch") or _is_soundcloud_url(query)
+        if "403" in low or "forbidden" in low:
+            if soundcloud:
                 raise MusicError(
-                    "YouTube cookie configuration is invalid. Put Netscape cookie text in YTDL_COOKIES, or clear it."
-                )
-            last_error = e
-            if opts.get("cookiefile"):
-                cookie_error = e
-        except yt_dlp.utils.DownloadError as e:
-            last_error = e
-            if opts.get("cookiefile"):
-                cookie_error = e
-
-    msg = str(last_error).replace("ERROR: ", "").splitlines()[0] if last_error else "unknown error"
-    auth_error = "Sign in to confirm" in msg or "not a bot" in msg
-    if auth_error and config.YTDL_COOKIEFILE and cookie_error:
-        raise MusicError(
-            "YouTube rejected the configured cookies. Replace YTDL_COOKIES with a fresh Netscape-format cookies.txt from a signed-in account. "
-            "If it still fails, YouTube may require a PO token for Railway."
-        )
-    if "403" in msg or "Forbidden" in msg:
-        raise MusicError(
-            "YouTube rejected this request (HTTP 403). Check that YTDL_COOKIES contains a fresh Netscape-format cookies.txt, then redeploy."
-        )
-    if auth_error:
-        raise MusicError(
-            "YouTube requires authentication here. Add fresh Netscape-format cookies.txt contents to YTDL_COOKIES."
-        )
-    raise MusicError(msg[:220])
+                    "SoundCloud refused Railway's request (HTTP 403). Try a public SoundCloud track link "
+                    "or another search phrase. YouTube is disabled."
+                ) from e
+            raise MusicError(f"The audio source refused Railway's request (HTTP 403): {msg[:150]}") from e
+        if "unsupported url" in low or "no suitable extractor" in low:
+            raise MusicError(
+                "I can't play that link. Use a Spotify link, a public SoundCloud link, or a direct audio URL."
+            ) from e
+        raise MusicError(msg[:220]) from e
 
 
-# ---- Spotify (metadata only, then matched on YouTube) ----
+# ---- Spotify metadata (track audio is matched on SoundCloud) ----
 _sp = {"token": None, "exp": 0}
 SPOTIFY_RE = re.compile(r"open\.spotify\.com/(?:intl-[a-z]+/)?(track|album|playlist)/([A-Za-z0-9]+)")
 
@@ -211,7 +211,7 @@ def spotify_tracks(kind, ident):
     return out[:config.MAX_QUEUE]
 
 
-# ---- Apple Music (public iTunes lookup, then matched on YouTube) ----
+# ---- Apple Music metadata (audio matched on SoundCloud) ----
 def apple_tracks(url):
     m = re.search(r"music\.apple\.com/([a-z]{2})/(album|song|playlist)/[^/?]+/([\w.\-]+)", url)
     if not m:
@@ -219,7 +219,7 @@ def apple_tracks(url):
     cc, kind, ident = m.groups()
     if kind == "playlist":
         raise MusicError("Apple Music playlists can't be read without an Apple developer account. "
-                         "Use a song/album link or a YouTube playlist.")
+                         "Use a song or album link instead.")
     q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
     extra = ""
     if "i" in q:
@@ -274,63 +274,57 @@ class Track:
 
 
 async def expand(query, requester):
-    """Turn a link or search text into a list of Tracks."""
+    """Expand Spotify metadata and supported links into SoundCloud or direct streams."""
     loop = asyncio.get_running_loop()
     query = query.strip()
+    if not query:
+        raise MusicError("Enter a song name, Spotify link, SoundCloud link, or direct audio URL.")
 
-    if "icloud.com" in query:
-        raise MusicError("iCloud library files are private/DRM-protected and can't be streamed by a bot. "
-                         "Send the Apple Music song link instead.")
+    if "icloud.com" in query.lower():
+        raise MusicError("iCloud library files are private/DRM-protected and can't be streamed by a bot.")
 
-    m = SPOTIFY_RE.search(query)
+    spotify_uri = re.fullmatch(r"spotify:(track|album|playlist):([A-Za-z0-9]+)", query)
+    m = SPOTIFY_RE.search(query) or spotify_uri
     if m:
-        pairs = await loop.run_in_executor(None, spotify_tracks, *m.groups())
-        return [Track(f"{a} - {t}", f"ytsearch1:{a} - {t} audio", requester) for t, a in pairs]
+        kind, ident = m.groups()
+        pairs = await loop.run_in_executor(None, spotify_tracks, kind, ident)
+        spotify_page = f"https://open.spotify.com/{kind}/{ident}"
+        return [
+            Track(f"{artist} - {title}", f"scsearch1:{artist} - {title} audio", requester, page=spotify_page)
+            for title, artist in pairs
+        ]
 
-    if "music.apple.com" in query:
+    if "music.apple.com" in query.lower():
         pairs = await loop.run_in_executor(None, apple_tracks, query)
-        return [Track(f"{a} - {t}", f"ytsearch1:{a} - {t} audio", requester) for t, a in pairs]
+        return [
+            Track(f"{artist} - {title}", f"scsearch1:{artist} - {title} audio", requester, page=query)
+            for title, artist in pairs
+        ]
 
-    if query.startswith("http"):
-        url = query.replace("music.youtube.com", "www.youtube.com")
-        if "list=" in url and "watch?v=" not in url:           # a whole playlist
-            info = await loop.run_in_executor(None, extract, url, True)
-            tracks = []
-            for e in info.get("entries") or []:
-                if not e:
-                    continue
-                link = e.get("url") or (f"https://www.youtube.com/watch?v={e['id']}" if e.get("id") else None)
-                if link:
-                    tracks.append(Track(e.get("title") or "Unknown", link, requester, duration=e.get("duration")))
+    if query.startswith(("http://", "https://")):
+        if _is_youtube_url(query):
+            raise MusicError("YouTube links are disabled. Use a Spotify link, SoundCloud link, or direct audio URL.")
+        parsed = urllib.parse.urlsplit(query)
+        is_playlist = "/sets/" in parsed.path.lower()
+        info = await loop.run_in_executor(None, extract, query, is_playlist)
+        entries = [entry for entry in (info.get("entries") or []) if entry]
+        if entries:
+            tracks = [Track.from_info(entry, requester) for entry in entries[:config.MAX_QUEUE]]
             if not tracks:
                 raise MusicError("That playlist is empty or private.")
-            return tracks[:config.MAX_QUEUE]
-        info = await loop.run_in_executor(None, extract, url)
-        if info.get("entries"):
-            return [Track.from_info(e, requester) for e in info["entries"] if e][:config.MAX_QUEUE]
+            return tracks
         return [Track.from_info(info, requester)]
 
-    try:
-        info = await loop.run_in_executor(None, extract, f"ytsearch1:{query}")
-    except MusicError as youtube_error:
-        # Railway IPs are increasingly challenged by YouTube search. Fall back
-        # to SoundCloud for plain text searches so music can still play.
-        if "403" not in str(youtube_error) and "Forbidden" not in str(youtube_error):
-            raise
-        try:
-            info = await loop.run_in_executor(None, extract, f"scsearch1:{query}")
-        except MusicError:
-            raise youtube_error
-
-    entries = [e for e in (info.get("entries") or []) if e]
+    info = await loop.run_in_executor(None, extract, f"scsearch1:{query}")
+    entries = [entry for entry in (info.get("entries") or []) if entry]
     if not entries:
-        raise MusicError("No results from YouTube or SoundCloud.")
+        raise MusicError("No SoundCloud results. Try a different song name or paste a public SoundCloud track link.")
     return [Track.from_info(entries[0], requester)]
 
 
 # ======================= player =======================
 class ProbedAudioSource(discord.AudioSource):
-    """Report when FFmpeg produces a real Opus packet."""
+    """Report when FFmpeg produces the first non-empty audio frame."""
 
     def __init__(self, original, on_audio):
         self.original = original
@@ -484,13 +478,13 @@ class GuildPlayer:
                 self.skipped = False
                 self.next_event.clear()
                 try:
-                    header_blob = "\\r\\n".join(
+                    header_blob = "\r\n".join(
                         f"{key}: {value}" for key, value in track.http_headers.items()
                         if key and value
                     )
                     before_options = FFMPEG_BEFORE
                     if header_blob:
-                        header_blob += "\\r\\n"
+                        header_blob += "\r\n"
                         before_options += f" -headers {shlex.quote(header_blob)}"
                     first_audio = asyncio.Event()
                     kbps = max(16, min(config.AUDIO_BITRATE, vc.channel.bitrate // 1000))
@@ -510,8 +504,11 @@ class GuildPlayer:
                     self.current = None
                     continue
 
+                player_errors = []
+
                 def after(err, ev=self.next_event):
                     if err:
+                        player_errors.append(type(err).__name__)
                         print(f"[music] player error: {err}")
                     loop.call_soon_threadsafe(ev.set)
 
@@ -541,9 +538,10 @@ class GuildPlayer:
                 if first_audio.is_set() and pause_after_start and vc.is_playing():
                     vc.pause()
                 if not first_audio.is_set():
+                    detail = f" ({player_errors[-1]})" if player_errors else ""
                     await self.say(
-                        f"🔇 **{track.title}** started but FFmpeg produced no audio. "
-                        "The source may be rejecting Railway; check fresh YTDL_COOKIES and try again."
+                        f"🔇 **{track.title}** started but FFmpeg produced no audio{detail}. "
+                        "Try a public SoundCloud track link and check the Railway runtime logs."
                     )
                     if vc.is_playing():
                         vc.stop()
@@ -844,10 +842,12 @@ class Music(BaseCog):
                 p.queue.clear()
                 p.task.cancel()
 
-    @commands.hybrid_command(name="play", aliases=["p"], description="Play a song, playlist or link (YouTube, YT Music, Spotify, Apple Music...)")
-    @app_commands.describe(query="Song name or a YouTube / Spotify / Apple Music link")
+    @commands.hybrid_command(name="play", aliases=["p"], description="Play a song, playlist or supported audio link")
+    @app_commands.describe(query="Song name, Spotify link, SoundCloud link, or direct audio URL")
     async def play(self, ctx, *, query: str):
-        """!play <song name | YouTube / YT Music / Spotify / Apple Music link>"""
+        """!play <song name | Spotify or SoundCloud link>"""
+        if ctx.interaction and not ctx.interaction.response.is_done():
+            await ctx.interaction.response.defer(thinking=True)
         voice = ctx.author.voice
         if not voice or not voice.channel:
             raise MusicError("Join a voice channel first.")
@@ -857,8 +857,7 @@ class Music(BaseCog):
             raise MusicError(f"I can join **{voice.channel.name}**, but I need the **Speak** permission there.")
         p = self.player(ctx.guild)
         p.text_channel = ctx.channel
-        async with ctx.typing():
-            tracks = await expand(query, ctx.author.display_name)
+        tracks = await expand(query, ctx.author.display_name)
         n = p.add(tracks)
         if n == 0:
             raise MusicError("The queue is full.")
@@ -876,7 +875,9 @@ class Music(BaseCog):
 
     @commands.hybrid_command(name="testaudio", aliases=["audiotest"], description="Play a short tone to test Discord audio")
     async def testaudio(self, ctx):
-        """Play a local tone to isolate voice output from online music sources."""
+        """Play a local tone to isolate Discord voice output from online sources."""
+        if ctx.interaction and not ctx.interaction.response.is_done():
+            await ctx.interaction.response.defer(ephemeral=True, thinking=True)
         voice = getattr(ctx.author, "voice", None)
         if not voice or not voice.channel:
             raise MusicError("Join a voice channel first.")
@@ -889,12 +890,9 @@ class Music(BaseCog):
 
         first_audio = asyncio.Event()
         test_loop = asyncio.get_running_loop()
-        kbps = max(16, min(config.AUDIO_BITRATE, voice.channel.bitrate // 1000))
         source = ProbedAudioSource(
-            discord.FFmpegOpusAudio(
+            discord.FFmpegPCMAudio(
                 "sine=frequency=880:duration=4",
-                bitrate=kbps,
-                codec="libopus",
                 before_options="-f lavfi",
                 options="-af volume=0.25",
             ),
@@ -902,21 +900,29 @@ class Music(BaseCog):
         )
         try:
             vc.play(source)
-        except (discord.ClientException, OSError, RuntimeError) as e:
-            raise MusicError(f"Discord audio test could not start: {e}")
+        except (discord.DiscordException, OSError, RuntimeError) as e:
+            raise MusicError(f"Discord audio test could not start: {e}") from e
 
         try:
-            await asyncio.wait_for(first_audio.wait(), timeout=3)
+            await asyncio.wait_for(first_audio.wait(), timeout=4)
         except asyncio.TimeoutError:
-            await ctx.send(embed=info_embed(
-                "⚠️ FFmpeg did not produce audio frames. Check the Railway FFmpeg runtime logs.",
-                YELLOW,
-            ))
+            if vc.is_playing():
+                vc.stop()
+            await ctx.send(
+                embed=info_embed(
+                    "FFmpeg did not produce PCM audio frames. Check the Railway FFmpeg runtime logs.",
+                    YELLOW,
+                ),
+                ephemeral=ctx.interaction is not None,
+            )
             return
-        await ctx.send(embed=info_embed(
-            "✅ FFmpeg produced Opus packets and voice playback started. If you still hear nothing, check the client output device, server mute, and voice connection.",
-            GREEN,
-        ))
+        await ctx.send(
+            embed=info_embed(
+                "FFmpeg produced audio frames and Discord voice playback started. If you still hear nothing, check the voice output device and whether the bot is server-muted.",
+                GREEN,
+            ),
+            ephemeral=ctx.interaction is not None,
+        )
 
     @commands.hybrid_command(name="skip", aliases=["s"], description="Skip the current song")
     async def skip(self, ctx):
@@ -1146,7 +1152,7 @@ async def setup(bot):
     a = bot.add_console
     a("join", c_join, "join <channel> [temp]", "join a voice channel and stay 24/7", group=GROUP)
     a("leave", c_leave, "leave", "bot leaves voice", group=GROUP)
-    a("play", c_play, "play <name or link>", "YouTube / YT Music / Spotify / Apple Music", aliases=("p",), group=GROUP)
+    a("play", c_play, "play <name or link>", "Spotify metadata + SoundCloud/direct audio", aliases=("p",), group=GROUP)
     a("skip", c_skip, "skip", "skip current track", group=GROUP)
     a("pause", c_pause, "pause", "pause", group=GROUP)
     a("resume", c_resume, "resume", "resume", group=GROUP)
