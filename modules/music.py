@@ -329,6 +329,22 @@ async def expand(query, requester):
 
 
 # ======================= player =======================
+class ProbedVolumeSource(discord.PCMVolumeTransformer):
+    """Volume transformer that reports when FFmpeg actually yields PCM audio."""
+
+    def __init__(self, original, volume, on_audio):
+        super().__init__(original, volume=volume)
+        self._on_audio = on_audio
+        self._reported_audio = False
+
+    def read(self):
+        packet = super().read()
+        if packet and not self._reported_audio:
+            self._reported_audio = True
+            self._on_audio()
+        return packet
+
+
 class GuildPlayer:
     def __init__(self, cog, guild):
         self.cog = cog
@@ -468,13 +484,15 @@ class GuildPlayer:
                     if header_blob:
                         header_blob += "\\r\\n"
                         before_options += f" -headers {shlex.quote(header_blob)}"
-                    source = discord.PCMVolumeTransformer(
+                    first_audio = asyncio.Event()
+                    source = ProbedVolumeSource(
                         discord.FFmpegPCMAudio(
                             track.stream_url,
                             before_options=before_options,
                             options=FFMPEG_OPTS,
                         ),
                         volume=self.volume,
+                        on_audio=lambda: loop.call_soon_threadsafe(first_audio.set),
                     )
                     kbps = max(16, min(config.AUDIO_BITRATE, vc.channel.bitrate // 1000))
                     self.kbps = kbps
@@ -504,6 +522,24 @@ class GuildPlayer:
 
                 await self.set_status(config.VC_STATUS_TEMPLATE.format(title=track.title))
                 await self.announce(track)
+
+                audio_wait = asyncio.create_task(first_audio.wait())
+                finish_wait = asyncio.create_task(self.next_event.wait())
+                done, pending = await asyncio.wait(
+                    {audio_wait, finish_wait},
+                    timeout=8,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                if not first_audio.is_set():
+                    await self.say(
+                        f"🔇 **{track.title}** started but FFmpeg produced no audio. "
+                        "The source may be rejecting Railway; check fresh YTDL_COOKIES and try again."
+                    )
+                    if vc.is_playing():
+                        vc.stop()
+
                 while True:
                     try:
                         await asyncio.wait_for(self.next_event.wait(), 5)
@@ -799,6 +835,9 @@ class Music(BaseCog):
         if not voice or not voice.channel:
             raise MusicError("Join a voice channel first.")
         await self.connect(ctx.guild, voice.channel)
+        permissions = voice.channel.permissions_for(ctx.guild.me)
+        if not permissions.speak:
+            raise MusicError(f"I can join **{voice.channel.name}**, but I need the **Speak** permission there.")
         p = self.player(ctx.guild)
         p.text_channel = ctx.channel
         async with ctx.typing():
