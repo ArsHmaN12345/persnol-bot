@@ -25,10 +25,6 @@ SET_PRESENCE = True         # show "Listening to <song>" on the bot's profile
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 
-# Optional: cookies.txt for yt-dlp. Helps when YouTube says "Sign in to confirm you're not a bot"
-# (common on VPS/datacenter IPs). Use a throwaway Google account, never your main one.
-YTDL_COOKIEFILE = os.getenv("YTDL_COOKIEFILE", "")
-
 # ---------- JOIN-TO-CREATE ----------
 JTC_ALLOW_EVERYONE = True   # True = any server member can make/use their own temp room
                             # False = only the owner and trusted users
@@ -44,13 +40,3 @@ AI_MAX_STEPS = 6            # max tool-calling rounds per request
 AI_HISTORY_TURNS = 6        # how many past exchanges the AI remembers per user
 AI_MENTION = True           # @mention the bot to talk to the AI (owner/trusted only)
 
-# Railway/hosting friendly: paste the FULL contents of cookies.txt into a variable named YTDL_COOKIES
-# and it is written to a temp file automatically.
-_cookies = os.getenv("YTDL_COOKIES", "")
-if _cookies and not YTDL_COOKIEFILE:
-    import tempfile
-    YTDL_COOKIEFILE = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
-    with open(YTDL_COOKIEFILE, "w", encoding="utf-8") as _f:
-        _f.write(_cookies if _cookies.endswith("\n") else _cookies + "\n")
-elif YTDL_COOKIEFILE and ("; " in YTDL_COOKIEFILE or "\n" in YTDL_COOKIEFILE or len(YTDL_COOKIEFILE) > 240):
-    raise RuntimeError("YTDL_COOKIEFILE must be a path. Put cookie text in YTDL_COOKIES instead.")
