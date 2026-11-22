@@ -1,2 +1,2 @@
 discord.py[voice]
-yt-dlp[default]
+yt-dlp[default,curl-cffi]
