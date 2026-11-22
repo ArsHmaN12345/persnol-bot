@@ -7,7 +7,6 @@ The panel (and /voice commands) give the room owner:
 Trusted / blocked people and saved settings follow the owner into every future room.
 """
 import asyncio
-import os
 import re
 import time
 from typing import Literal
@@ -21,8 +20,6 @@ from utils import data, save_data, has_access, is_owner, BotError
 from ui import BaseCog, emb, BLURPLE, GREEN, RED, YELLOW, NO_PINGS
 
 GROUP = "jtc"
-ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
-BANNER = os.path.join(ASSETS, "panel_banner.gif")
 VIOLET, NEON, ORANGE, PINK = 0x8B5CF6, 0x22D3EE, 0xF59E0B, 0xEC4899
 PERM_MSG = ("I need **Manage Channels** and **Manage Roles** (room permissions), **Move Members**, "
             "**Connect**, **View Channel** and **Send Messages**.")
@@ -121,6 +118,23 @@ class JoinToCreate(BaseCog):
             if str(rid) not in rooms():
                 waits().pop(wid, None)
         save_data()
+        await self.refresh_panel_messages()
+
+    async def refresh_panel_messages(self):
+        """Update saved panels after a deploy so the layout stays current."""
+        for guild_id, cfg in list(data["jtc"]["guilds"].items()):
+            try:
+                guild = self.bot.get_guild(int(guild_id))
+                channel = guild.get_channel(int(cfg.get("panel_channel") or 0)) if guild else None
+                message_id = int(cfg.get("panel_message") or 0)
+                if channel is None or not message_id:
+                    continue
+                message = await channel.fetch_message(message_id)
+                await message.edit(embed=self.panel_payload(), view=PanelView(self))
+            except discord.NotFound:
+                continue
+            except (discord.HTTPException, TypeError, ValueError) as e:
+                print(f"[jtc] couldn't refresh saved panel: {type(e).__name__}: {e}")
 
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel):
@@ -568,25 +582,34 @@ class JoinToCreate(BaseCog):
     def room_card(self, room):
         info = self.room_info(room.id) or {}
         owner = room.guild.get_member(info.get("owner", 0))
+        prefs = profile(room.guild.id, info.get("owner", 0))
         pv = privacy_of(room)
-        p = profile(room.guild.id, info.get("owner", 0))
         color = PINK if pv["hidden"] else ORANGE if pv["locked"] else NEON
         privacy = "👻 Hidden" if pv["hidden"] else "🔒 Locked" if pv["locked"] else "🔓 Public"
-        e = discord.Embed(title=f"🎙️ {room.name}", color=color,
-                          description=f"👑 **Owner:** {owner.mention if owner else '<unknown>'}")
-        e.add_field(name="🔐 Privacy", value=privacy)
-        e.add_field(name="👥 Limit", value=str(room.user_limit or "∞"))
-        e.add_field(name="🎚️ Quality", value=f"{room.bitrate // 1000} kbps")
-        e.add_field(name="🌍 Region", value=str(room.rtc_region or "Automatic"))
-        e.add_field(name="💬 Chat", value="🔇 Closed" if pv["chat_closed"] else "💬 Open")
-        e.add_field(name="⏳ Waiting room", value="✅ On" if info.get("waiting") else "Off")
-        e.add_field(name="🤝 Trusted", value=str(len(p["trusted"])))
-        e.add_field(name="⛔ Blocked", value=str(len(p["blocked"])))
-        e.add_field(name="🔊 In room", value=str(len([m for m in room.members if not m.bot])))
+        members = len([m for m in room.members if not m.bot])
+        limit = str(room.user_limit) if room.user_limit else "∞"
+        region = str(room.rtc_region or "Automatic").replace("_", " ").title()
+        chat = "Closed" if pv["chat_closed"] else "Open"
+        waiting = "On" if info.get("waiting") else "Off"
+
+        e = discord.Embed(
+            title=f"🎙️ {room.name}",
+            description=(
+                f"👑 **Owner:** {owner.mention if owner else 'Unknown'}\n"
+                f"{privacy}  ·  👥 **{members}/{limit}** members\n"
+                f"🎚️ **{room.bitrate // 1000} kbps**  ·  🌍 **{region}**\n"
+                f"💬 **Chat {chat}**  ·  ⏳ **Waiting {waiting}**"
+            ),
+            color=color,
+        )
+        e.add_field(
+            name="Room access",
+            value=f"🤝 **{len(prefs['trusted'])} trusted**  ·  ⛔ **{len(prefs['blocked'])} blocked**",
+            inline=False,
+        )
         if owner:
             e.set_thumbnail(url=owner.display_avatar.url)
-        e.set_footer(text="Manage this room with the interface panel or /voice commands")
-        e.timestamp = discord.utils.utcnow()
+        e.set_footer(text="Use the controls above or /voice")
         return e
 
     async def refresh_card(self, room):
@@ -611,37 +634,50 @@ class JoinToCreate(BaseCog):
     # ---------- admin: setup / settings ----------
     def panel_payload(self):
         e = discord.Embed(
-            title="✨ Voice Room Interface ✨", color=VIOLET,
-            description="Manage **your** temporary voice room with the buttons below.\n"
-                        "More options are available with **`/voice`** commands.")
-        e.add_field(name="\u200b", inline=False, value=(
-            "```\n"
-            "📝 NAME     👥 LIMIT    🔐 PRIVACY  ⏳ WAITING   💬 CHAT\n"
-            "🤝 TRUST    🙅 UNTRUST  📨 INVITE   👢 KICK      🌍 REGION\n"
-            "⛔ BLOCK    ✅ UNBLOCK  👑 CLAIM    🔁 TRANSFER  🗑️ DELETE\n"
-            "🎚️ BITRATE  ℹ️ INFO     💾 SAVE\n"
-            "```"))
-        e.add_field(name="🚀 How it works",
-                    value="Join the **➕ Join to Create** channel → you get your own room → press a button here.", inline=False)
+            title="🎙️ Temp Voice Controls",
+            color=VIOLET,
+            description="Join **➕ Join to Create** to open your room, then choose an icon below.\n"
+                        "Use **`/voice`** for the full command list.",
+        )
+        e.add_field(
+            name="🏠 Room",
+            value="📝 **Name** · 👥 **Limit** · 🔐 **Privacy** · ⏳ **Waiting** · 💬 **Chat** · 🎚️ **Bitrate** · 🌍 **Region**",
+            inline=False,
+        )
+        e.add_field(
+            name="👥 Members",
+            value="🤝 **Trust** · 🙅 **Untrust** · 📨 **Invite** · 👢 **Kick** · ⛔ **Block** · ✅ **Unblock**",
+            inline=False,
+        )
+        e.add_field(
+            name="👑 Owner",
+            value="👑 **Claim** · 🔁 **Transfer** · ℹ️ **Info** · 💾 **Save** · 🗑️ **Delete**",
+            inline=False,
+        )
         if self.bot.user:
             e.set_thumbnail(url=self.bot.user.display_avatar.url)
-        e.set_footer(text="Press the buttons below to use the interface")
-        file = None
-        if os.path.exists(BANNER):
-            file = discord.File(BANNER, filename="panel_banner.gif")
-            e.set_image(url="attachment://panel_banner.gif")
-        return e, file
+        e.set_footer(text="The icons below match this guide")
+        return e
 
     async def post_panel(self, guild, channel, cfg):
+        embed = self.panel_payload()
         old_id = cfg.get("panel_message")
         old_ch = guild.get_channel(cfg.get("panel_channel") or 0)
         if old_id and old_ch:
             try:
-                await (await old_ch.fetch_message(old_id)).delete()
+                old_msg = await old_ch.fetch_message(old_id)
+                if old_ch.id == channel.id:
+                    await old_msg.edit(embed=embed, view=PanelView(self))
+                    msg = old_msg
+                else:
+                    await old_msg.delete()
+                    msg = await channel.send(embed=embed, view=PanelView(self))
+            except discord.NotFound:
+                msg = await channel.send(embed=embed, view=PanelView(self))
             except discord.HTTPException:
-                pass
-        embed, file = self.panel_payload()
-        msg = await channel.send(embed=embed, view=PanelView(self), **({"file": file} if file else {}))
+                msg = await channel.send(embed=embed, view=PanelView(self))
+        else:
+            msg = await channel.send(embed=embed, view=PanelView(self))
         cfg["panel_channel"], cfg["panel_message"] = channel.id, msg.id
         save_data()
         return msg
@@ -1120,64 +1156,64 @@ class PanelView(discord.ui.View):
         await interaction.response.send_modal(ValueModal(title, label, cb, default=default))
 
     # ----- row 1 -----
-    @discord.ui.button(label="Name", emoji="📝", style=discord.ButtonStyle.primary, custom_id="jtc:name", row=0)
+    @discord.ui.button(emoji="📝", style=discord.ButtonStyle.primary, custom_id="jtc:name", row=0)
     async def b_name(self, interaction, button):
         room = self.cog.owned_room(interaction.user)
         await self._modal(interaction, "Rename your room", "New name", self.cog.rename, default=room.name if room else "")
 
-    @discord.ui.button(label="Limit", emoji="👥", style=discord.ButtonStyle.primary, custom_id="jtc:limit", row=0)
+    @discord.ui.button(emoji="👥", style=discord.ButtonStyle.primary, custom_id="jtc:limit", row=0)
     async def b_limit(self, interaction, button):
         await self._modal(interaction, "User limit", "Max people (0 = unlimited)", self.cog.set_limit)
 
-    @discord.ui.button(label="Privacy", emoji="🔐", style=discord.ButtonStyle.primary, custom_id="jtc:privacy", row=0)
+    @discord.ui.button(emoji="🔐", style=discord.ButtonStyle.primary, custom_id="jtc:privacy", row=0)
     async def b_privacy(self, interaction, button):
         opts = [("Unlock", "unlock", "🔓", "Anyone can join"), ("Lock", "lock", "🔒", "Only trusted or invited people can join"),
                 ("Invisible", "invisible", "👻", "Hide the room from everyone else"), ("Visible", "visible", "👁️", "Show the room again")]
         await self._choice(interaction, opts, self.cog.set_privacy, "Choose privacy…", "🔐 **Room privacy**")
 
-    @discord.ui.button(label="Waiting Room", emoji="⏳", style=discord.ButtonStyle.primary, custom_id="jtc:waiting", row=0)
+    @discord.ui.button(emoji="⏳", style=discord.ButtonStyle.primary, custom_id="jtc:waiting", row=0)
     async def b_waiting(self, interaction, button):
         await self._quick(interaction, self.cog.toggle_waiting)
 
-    @discord.ui.button(label="Chat", emoji="💬", style=discord.ButtonStyle.primary, custom_id="jtc:chat", row=0)
+    @discord.ui.button(emoji="💬", style=discord.ButtonStyle.primary, custom_id="jtc:chat", row=0)
     async def b_chat(self, interaction, button):
         opts = [("Open chat", "open", "💬", "Everyone can write"), ("Close chat", "close", "🔇", "Only you and trusted people"),
                 ("Clear chat", "clear", "🧹", "Delete the latest messages")]
         await self._choice(interaction, opts, self.cog.set_chat, "Choose a chat option…", "💬 **Voice chat**")
 
     # ----- row 2 -----
-    @discord.ui.button(label="Trust", emoji="🤝", style=discord.ButtonStyle.success, custom_id="jtc:trust", row=1)
+    @discord.ui.button(emoji="🤝", style=discord.ButtonStyle.success, custom_id="jtc:trust", row=1)
     async def b_trust(self, interaction, button):
         await self._pick_user(interaction, self.cog.trust, "🤝 **Who do you trust?** They can always join your rooms.")
 
-    @discord.ui.button(label="Untrust", emoji="🙅", style=discord.ButtonStyle.secondary, custom_id="jtc:untrust", row=1)
+    @discord.ui.button(emoji="🙅", style=discord.ButtonStyle.secondary, custom_id="jtc:untrust", row=1)
     async def b_untrust(self, interaction, button):
         await self._saved_list(interaction, "trusted", self.cog.untrust, "Your trusted list is empty.", "🙅 **Remove someone from your trusted list**")
 
-    @discord.ui.button(label="Invite", emoji="📨", style=discord.ButtonStyle.success, custom_id="jtc:invite", row=1)
+    @discord.ui.button(emoji="📨", style=discord.ButtonStyle.success, custom_id="jtc:invite", row=1)
     async def b_invite(self, interaction, button):
         await self._pick_user(interaction, self.cog.invite, "📨 **Who do you want to invite?** I'll send them a DM.")
 
-    @discord.ui.button(label="Kick", emoji="👢", style=discord.ButtonStyle.danger, custom_id="jtc:kick", row=1)
+    @discord.ui.button(emoji="👢", style=discord.ButtonStyle.danger, custom_id="jtc:kick", row=1)
     async def b_kick(self, interaction, button):
         await self._pick_user(interaction, self.cog.kick, "👢 **Who should I remove from your room?**")
 
-    @discord.ui.button(label="Region", emoji="🌍", style=discord.ButtonStyle.primary, custom_id="jtc:region", row=1)
+    @discord.ui.button(emoji="🌍", style=discord.ButtonStyle.primary, custom_id="jtc:region", row=1)
     async def b_region(self, interaction, button):
         regs = [("Automatic", "auto", "🌐", "Let Discord choose the best server")]
         regs += [(n, v, "🌍", None) for n, v in await self.cog.regions()][:24]
         await self._choice(interaction, regs, self.cog.set_region, "Choose a region…", "🌍 **Voice region**")
 
     # ----- row 3 -----
-    @discord.ui.button(label="Block", emoji="⛔", style=discord.ButtonStyle.danger, custom_id="jtc:block", row=2)
+    @discord.ui.button(emoji="⛔", style=discord.ButtonStyle.danger, custom_id="jtc:block", row=2)
     async def b_block(self, interaction, button):
         await self._pick_user(interaction, self.cog.block, "⛔ **Who should be blocked?** They can't join your rooms.")
 
-    @discord.ui.button(label="Unblock", emoji="✅", style=discord.ButtonStyle.secondary, custom_id="jtc:unblock", row=2)
+    @discord.ui.button(emoji="✅", style=discord.ButtonStyle.secondary, custom_id="jtc:unblock", row=2)
     async def b_unblock(self, interaction, button):
         await self._saved_list(interaction, "blocked", self.cog.unblock, "Your block list is empty.", "✅ **Unblock someone**")
 
-    @discord.ui.button(label="Claim", emoji="👑", style=discord.ButtonStyle.success, custom_id="jtc:claim", row=2)
+    @discord.ui.button(emoji="👑", style=discord.ButtonStyle.success, custom_id="jtc:claim", row=2)
     async def b_claim(self, interaction, button):
         try:
             room, text = await self.cog.claim(interaction.user)
@@ -1188,11 +1224,11 @@ class PanelView(discord.ui.View):
         if room is not None:
             await self.cog.refresh_card(room)
 
-    @discord.ui.button(label="Transfer", emoji="🔁", style=discord.ButtonStyle.primary, custom_id="jtc:transfer", row=2)
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.primary, custom_id="jtc:transfer", row=2)
     async def b_transfer(self, interaction, button):
         await self._pick_user(interaction, self.cog.transfer, "🔁 **Who becomes the new owner?** They must be in your room.")
 
-    @discord.ui.button(label="Delete", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="jtc:delete", row=2)
+    @discord.ui.button(emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="jtc:delete", row=2)
     async def b_delete(self, interaction, button):
         room = await self._room(interaction)
         if room is not None:
@@ -1201,17 +1237,17 @@ class PanelView(discord.ui.View):
                 ephemeral=True, view=ConfirmDelete(self.cog, interaction.user.id, room.id))
 
     # ----- row 4 (extras) -----
-    @discord.ui.button(label="Bitrate", emoji="🎚️", style=discord.ButtonStyle.secondary, custom_id="jtc:bitrate", row=3)
+    @discord.ui.button(emoji="🎚️", style=discord.ButtonStyle.secondary, custom_id="jtc:bitrate", row=3)
     async def b_bitrate(self, interaction, button):
         await self._modal(interaction, "Audio quality", "Bitrate in kbps (e.g. 64, 96, 128)", self.cog.set_bitrate)
 
-    @discord.ui.button(label="Info", emoji="ℹ️", style=discord.ButtonStyle.secondary, custom_id="jtc:info", row=3)
+    @discord.ui.button(emoji="ℹ️", style=discord.ButtonStyle.secondary, custom_id="jtc:info", row=3)
     async def b_info(self, interaction, button):
         room = await self._room(interaction)
         if room is not None:
             await interaction.response.send_message(embed=self.cog.room_card(room), ephemeral=True)
 
-    @discord.ui.button(label="Save", emoji="💾", style=discord.ButtonStyle.secondary, custom_id="jtc:save", row=3)
+    @discord.ui.button(emoji="💾", style=discord.ButtonStyle.secondary, custom_id="jtc:save", row=3)
     async def b_save(self, interaction, button):
         await self._quick(interaction, self.cog.save_prefs)
 
