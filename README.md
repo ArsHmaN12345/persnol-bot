@@ -13,7 +13,7 @@ Owner only: drag/autodc/automute, kick/ban/unban/timeout, /jtc setup, roulette, 
 
 === SLASH COMMANDS (also work as !text commands) ===
 Help:    /help [home|music|voice|moderation|automation|tools] (buttons + direct categories)
-Music:  /join (stays 24/7) /play /skip /pause /resume /stop /queue /nowplaying /volume /loop /shuffle /remove /leave
+Music:  /join (stays 24/7) /spotifyconnect /play /skip /pause /resume /stop /queue /nowplaying /volume /loop /shuffle /remove /leave
 Voice:  /moveall (asks where) /party /mute /unmute /deafen /undeafen /automute /automutes
 Drag:   /setchannels /drag /autodc /stopautodc (/undc, /stopdc) /undrag /undragall /targets /dragdelay [seconds]
 Mod:    /kick /ban /unban /banlist /timeout /untimeout /timeouts
@@ -73,7 +73,11 @@ in your language. Audio is sent to Google for that one request and is not stored
 1. Put this folder in a PRIVATE GitHub repo (.gitignore keeps .env / data.json out).
 2. Railway -> New Project -> Deploy from GitHub repo (builds the Dockerfile).
 3. Variables:  DISCORD_TOKEN, OWNER_ID, GEMINI_API_KEY, DATA_FILE=/data/data.json,
-   (optional) SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, YTDL_COOKIES (cookie text; never put cookie text in YTDL_COOKIEFILE)
+   SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI (HTTPS callback URL ending in /spotify/callback),
+   (optional) YTDL_COOKIES (cookie text; never put cookie text in YTDL_COOKIEFILE)
+6. Add the exact SPOTIFY_REDIRECT_URI to your Spotify Developer Dashboard's Redirect URIs.
+7. In Discord, run /spotifyconnect once; then /play <Spotify playlist link>. The connected account must own or collaborate on the playlist.
+   Spotify supplies playlist metadata only; audio is matched from SoundCloud. The YouTube source is disabled.
 4. Add a Volume mounted at /data  (keeps trust list, targets, voice rooms across deploys)
 5. Logs should show "Logged in as ..." and "running headless" (normal on Railway).
 

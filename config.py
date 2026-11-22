@@ -14,7 +14,7 @@ DRAG_DELAY = 1.5            # seconds between moves (keep >= 1)
 
 # ---------- MUSIC MODULE ----------
 AUDIO_BITRATE = 256         # kbps Opus target (automatically capped to the voice channel's bitrate)
-DEFAULT_VOLUME = 0.5        # 0.0 - 2.0
+DEFAULT_VOLUME = 1.0        # 0.0 - 2.0
 MAX_QUEUE = 300
 IDLE_TIMEOUT = 300          # seconds of empty queue before the bot leaves voice
 VC_STATUS = True            # show the current song as the voice channel status
@@ -24,6 +24,9 @@ SET_PRESENCE = True         # show "Listening to <song>" on the bot's profile
 # Needed only for Spotify links (free): https://developer.spotify.com/dashboard
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+# HTTPS callback hosted by this bot, for Spotify playlist authorization.
+SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "")
+SPOTIFY_OAUTH_PORT = int(os.getenv("PORT", "8080"))
 
 # ---------- JOIN-TO-CREATE ----------
 JTC_ALLOW_EVERYONE = True   # True = any server member can make/use their own temp room

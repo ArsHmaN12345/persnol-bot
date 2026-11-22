@@ -3,8 +3,10 @@ import asyncio
 import base64
 import collections
 import json
+import os
 import random
 import re
+import secrets
 import shlex
 import time
 import urllib.error
@@ -12,6 +14,7 @@ import urllib.parse
 import urllib.request
 
 import discord
+from aiohttp import web
 from discord.ext import commands
 import yt_dlp
 
@@ -147,41 +150,127 @@ def extract(query, flat=False):
         raise MusicError(msg[:220]) from e
 
 
-# ---- Spotify metadata (track audio is matched on SoundCloud) ----
+# ---- Spotify metadata and playlist authorization ----
 _sp = {"token": None, "exp": 0}
 SPOTIFY_RE = re.compile(r"open\.spotify\.com/(?:intl-[a-z]+/)?(track|album|playlist)/([A-Za-z0-9]+)")
+_SPOTIFY_OAUTH_STATES = {}
 
 
-def _spotify_token():
+def _spotify_basic_header():
+    auth = base64.b64encode(
+        f"{config.SPOTIFY_CLIENT_ID}:{config.SPOTIFY_CLIENT_SECRET}".encode()
+    ).decode()
+    return f"Basic {auth}"
+
+
+def _spotify_token(require_user=False):
+    """Return a Spotify API token, refreshing the linked user token when needed."""
+    user_token = data.get("spotify_oauth") or {}
+    if user_token.get("refresh_token"):
+        if user_token.get("access_token") and time.time() < user_token.get("expires_at", 0) - 30:
+            return user_token["access_token"]
+        body = urllib.parse.urlencode({
+            "grant_type": "refresh_token",
+            "refresh_token": user_token["refresh_token"],
+        }).encode()
+        req = urllib.request.Request(
+            "https://accounts.spotify.com/api/token",
+            data=body,
+            headers={
+                "Authorization": _spotify_basic_header(),
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                token = json.load(r)
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            if require_user:
+                raise MusicError(
+                    "Spotify login expired. Run /spotifyconnect again, then retry the playlist."
+                ) from e
+            token = None
+        if token:
+            user_token["access_token"] = token["access_token"]
+            user_token["expires_at"] = time.time() + token.get("expires_in", 3600)
+            if token.get("refresh_token"):
+                user_token["refresh_token"] = token["refresh_token"]
+            save_data()
+            return user_token["access_token"]
+    if require_user:
+        raise MusicError("Connect Spotify first with /spotifyconnect to load playlists.")
     if _sp["token"] and time.time() < _sp["exp"] - 30:
         return _sp["token"]
     if not (config.SPOTIFY_CLIENT_ID and config.SPOTIFY_CLIENT_SECRET):
-        raise MusicError("Spotify links need SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in config.py.")
-    auth = base64.b64encode(f"{config.SPOTIFY_CLIENT_ID}:{config.SPOTIFY_CLIENT_SECRET}".encode()).decode()
+        raise MusicError("Add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in Railway.")
     req = urllib.request.Request(
         "https://accounts.spotify.com/api/token",
         data=b"grant_type=client_credentials",
-        headers={"Authorization": f"Basic {auth}", "Content-Type": "application/x-www-form-urlencoded"},
+        headers={
+            "Authorization": _spotify_basic_header(),
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
-            j = json.load(r)
-    except urllib.error.HTTPError:
-        raise MusicError("Spotify rejected your client ID/secret. Check them in config.py.")
-    _sp["token"], _sp["exp"] = j["access_token"], time.time() + j.get("expires_in", 3600)
+            token = json.load(r)
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        raise MusicError("Spotify rejected the app credentials or could not be reached.") from e
+    _sp["token"] = token["access_token"]
+    _sp["exp"] = time.time() + token.get("expires_in", 3600)
     return _sp["token"]
 
 
-def _spotify_get(url):
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {_spotify_token()}"})
+def _spotify_get(url, require_user=False, retry=True):
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {_spotify_token(require_user=require_user)}"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
+        if e.code == 401 and retry:
+            if require_user:
+                auth = data.get("spotify_oauth") or {}
+                auth["expires_at"] = 0
+            else:
+                _sp["token"], _sp["exp"] = None, 0
+            return _spotify_get(url, require_user=require_user, retry=False)
+        if e.code == 403 and require_user:
+            raise MusicError(
+                "Spotify only allows this playlist when the connected account owns it or collaborates on it. "
+                "Run /spotifyconnect with that account."
+            ) from e
         if e.code in (401, 403):
-            raise MusicError("Spotify refused this request (403). Dev-mode apps need the owner on Premium, "
-                             "and playlists can be restricted. Try a track/album link instead.")
-        raise MusicError(f"Spotify error {e.code}.")
+            raise MusicError("Spotify refused this request. Check the linked Spotify account and app access.") from e
+        raise MusicError(f"Spotify returned HTTP {e.code}.") from e
+    except urllib.error.URLError as e:
+        raise MusicError("Could not reach Spotify. Check the Railway logs and try again.") from e
+
+
+def _spotify_token_request(fields):
+    body = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(
+        "https://accounts.spotify.com/api/token",
+        data=body,
+        headers={
+            "Authorization": _spotify_basic_header(),
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.load(r)
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        raise MusicError("Spotify could not complete the login. Check the app redirect URI and try again.") from e
+
+
+def _spotify_exchange_code(code):
+    return _spotify_token_request({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": config.SPOTIFY_REDIRECT_URI,
+    })
 
 
 def spotify_tracks(kind, ident):
@@ -190,49 +279,36 @@ def spotify_tracks(kind, ident):
         t = _spotify_get(f"https://api.spotify.com/v1/tracks/{ident}")
         out.append((t["name"], t["artists"][0]["name"]))
     elif kind == "album":
-        alb = _spotify_get(f"https://api.spotify.com/v1/albums/{ident}")
-        page = alb["tracks"]
-        while page:
-            for t in page["items"]:
-                out.append((t["name"], t["artists"][0]["name"]))
+        page = _spotify_get(f"https://api.spotify.com/v1/albums/{ident}/tracks?limit=50")
+        while page and len(out) < config.MAX_QUEUE:
+            for t in page.get("items", []):
+                if t and t.get("artists"):
+                    out.append((t["name"], t["artists"][0]["name"]))
+                    if len(out) >= config.MAX_QUEUE:
+                        break
             page = _spotify_get(page["next"]) if page.get("next") and len(out) < config.MAX_QUEUE else None
-    else:  # playlist
-        page = _spotify_get(f"https://api.spotify.com/v1/playlists/{ident}/items?limit=100")
-        while page:
-            for it in page["items"]:
-                t = it.get("item") or it.get("track")
+    else:
+        page = _spotify_get(
+            f"https://api.spotify.com/v1/playlists/{ident}/items?limit=50",
+            require_user=True,
+        )
+        while page and len(out) < config.MAX_QUEUE:
+            for entry in page.get("items", []):
+                t = entry.get("item") or entry.get("track")
                 if t and t.get("type", "track") == "track" and t.get("artists"):
                     out.append((t["name"], t["artists"][0]["name"]))
-            page = _spotify_get(page["next"]) if page.get("next") and len(out) < config.MAX_QUEUE else None
+                    if len(out) >= config.MAX_QUEUE:
+                        break
+            page = (
+                _spotify_get(page["next"], require_user=True)
+                if page.get("next") and len(out) < config.MAX_QUEUE else None
+            )
     if not out:
-        raise MusicError("Couldn't read any tracks from that Spotify link.")
+        raise MusicError("Spotify returned no playable tracks from that link.")
     return out[:config.MAX_QUEUE]
 
 
-# ---- Apple Music metadata (audio matched on SoundCloud) ----
-def apple_tracks(url):
-    m = re.search(r"music\.apple\.com/([a-z]{2})/(album|song|playlist)/[^/?]+/([\w.\-]+)", url)
-    if not m:
-        raise MusicError("Unsupported Apple Music link. Use a song or album link.")
-    cc, kind, ident = m.groups()
-    if kind == "playlist":
-        raise MusicError("Apple Music playlists can't be read without an Apple developer account. "
-                         "Use a song or album link instead.")
-    q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-    extra = ""
-    if "i" in q:
-        ident = q["i"][0]
-    elif kind == "album":
-        extra = "&entity=song"
-    api = f"https://itunes.apple.com/lookup?id={ident}&country={cc}{extra}"
-    with urllib.request.urlopen(api, timeout=15) as r:
-        res = json.load(r).get("results", [])
-    out = [(x["trackName"], x["artistName"]) for x in res if x.get("kind") == "song"]
-    if not out:
-        raise MusicError("Couldn't read that Apple Music link.")
-    return out[:config.MAX_QUEUE]
-
-
+# ======================= supported sources =======================
 # ======================= tracks =======================
 class Track:
     def __init__(self, title, query, requester, stream_url=None, duration=None, page=None, thumb=None, http_headers=None):
@@ -293,11 +369,7 @@ async def expand(query, requester):
         ]
 
     if "music.apple.com" in query.lower():
-        pairs = await loop.run_in_executor(None, apple_tracks, query)
-        return [
-            Track(f"{artist} - {title}", f"scsearch1:{artist} - {title} audio", requester, page=query)
-            for title, artist in pairs
-        ]
+        raise MusicError("Unsupported music link. Use Spotify, SoundCloud, or a direct audio URL.")
 
     if query.startswith(("http://", "https://")):
         if _is_youtube_url(query):
@@ -705,9 +777,14 @@ class Music(BaseCog):
     def __init__(self, bot):
         self.bot = bot
         self.players = {}
+        self._oauth_runner = None
+        self.spotify_oauth_ready = False
 
     async def cog_unload(self):
         self._stay_task.cancel()
+        if self._oauth_runner is not None:
+            await self._oauth_runner.cleanup()
+            self._oauth_runner = None
         for p in list(self.players.values()):
             p.task.cancel()
             vc = p.guild.voice_client
@@ -724,6 +801,53 @@ class Music(BaseCog):
         self.next_try = {}
         self.fails = {}
         self._stay_task = asyncio.create_task(self._stay_loop())
+        if (
+            config.SPOTIFY_REDIRECT_URI
+            and config.SPOTIFY_CLIENT_ID
+            and config.SPOTIFY_CLIENT_SECRET
+        ):
+            app = web.Application()
+            app.router.add_get("/spotify/callback", self._spotify_callback)
+            runner = web.AppRunner(app, access_log=None)
+            await runner.setup()
+            site = web.TCPSite(runner, "0.0.0.0", config.SPOTIFY_OAUTH_PORT)
+            try:
+                await site.start()
+            except OSError as e:
+                await runner.cleanup()
+                print(f"[music] Spotify callback server did not start: {e}")
+            else:
+                self._oauth_runner = runner
+                self.spotify_oauth_ready = True
+                print(f"[music] Spotify OAuth callback listening on port {config.SPOTIFY_OAUTH_PORT}")
+        else:
+            print("[music] Spotify playlist linking is disabled; set Spotify app credentials and redirect URI.")
+
+    async def _spotify_callback(self, request):
+        state = request.query.get("state", "")
+        pending = _SPOTIFY_OAUTH_STATES.pop(state, None)
+        if not pending or time.time() - pending[1] > 600:
+            return web.Response(status=400, text="This Spotify link expired. Run /spotifyconnect in Discord again.")
+        if request.query.get("error"):
+            return web.Response(status=400, text="Spotify authorization was cancelled. You can close this page.")
+        code = request.query.get("code")
+        if not code:
+            return web.Response(status=400, text="Spotify did not return an authorization code.")
+        try:
+            token = await asyncio.get_running_loop().run_in_executor(
+                None, _spotify_exchange_code, code
+            )
+        except MusicError as e:
+            return web.Response(status=400, text=f"Spotify connection failed: {e}")
+        data["spotify_oauth"] = {
+            "access_token": token["access_token"],
+            "refresh_token": token.get("refresh_token", ""),
+            "expires_at": time.time() + token.get("expires_in", 3600),
+        }
+        save_data()
+        return web.Response(
+            text="Spotify connected. You can close this tab and return to Discord."
+        )
 
     async def stay_join(self, guild, channel, stay=True):
         perms = channel.permissions_for(guild.me)
@@ -825,10 +949,44 @@ class Music(BaseCog):
                 p.queue.clear()
                 p.task.cancel()
 
+    @commands.hybrid_command(name="spotifyconnect", description="Connect Spotify to load playlists")
+    async def spotifyconnect(self, ctx):
+        if ctx.author.id != config.OWNER_ID:
+            raise MusicError("Only the bot owner can connect the Spotify account.")
+        if not self.spotify_oauth_ready:
+            raise MusicError(
+                "Spotify linking is not configured. Set SPOTIFY_REDIRECT_URI in Railway and add the same "
+                "HTTPS callback URL to your Spotify developer app."
+            )
+        state = secrets.token_urlsafe(32)
+        now = time.time()
+        for old_state, pending in list(_SPOTIFY_OAUTH_STATES.items()):
+            if now - pending[1] > 600:
+                _SPOTIFY_OAUTH_STATES.pop(old_state, None)
+        _SPOTIFY_OAUTH_STATES[state] = (ctx.author.id, now)
+        params = urllib.parse.urlencode({
+            "client_id": config.SPOTIFY_CLIENT_ID,
+            "response_type": "code",
+            "redirect_uri": config.SPOTIFY_REDIRECT_URI,
+            "scope": "playlist-read-private playlist-read-collaborative",
+            "state": state,
+        })
+        url = f"https://accounts.spotify.com/authorize?{params}"
+        embed = discord.Embed(
+            title="Connect Spotify",
+            description=(
+                f"[Authorize Spotify]({url})\n\n"
+                "This links your Spotify account so the bot can read playlists you own or collaborate on. "
+                "It does not give the bot Spotify audio streaming."
+            ),
+            color=BLURPLE,
+        )
+        await ctx.send(embed=embed, ephemeral=ctx.interaction is not None)
+
     @commands.hybrid_command(name="play", aliases=["p"], description="Play a song, playlist or supported audio link")
-    @app_commands.describe(query="Song name, Spotify link, SoundCloud link, or direct audio URL")
+    @app_commands.describe(query="Song name, Spotify track/playlist link, SoundCloud link, or direct audio URL")
     async def play(self, ctx, *, query: str):
-        """!play <song name | Spotify or SoundCloud link>"""
+        """!play <song name | Spotify link or playlist>"""
         if ctx.interaction and not ctx.interaction.response.is_done():
             await ctx.interaction.response.defer(thinking=True)
         voice = ctx.author.voice
@@ -1161,7 +1319,7 @@ async def setup(bot):
     a = bot.add_console
     a("join", c_join, "join <channel> [temp]", "join a voice channel and stay 24/7", group=GROUP)
     a("leave", c_leave, "leave", "bot leaves voice", group=GROUP)
-    a("play", c_play, "play <name or link>", "Spotify metadata + SoundCloud/direct audio", aliases=("p",), group=GROUP)
+    a("play", c_play, "play <name or Spotify playlist link>", "Spotify playlist metadata + SoundCloud/direct audio", aliases=("p",), group=GROUP)
     a("skip", c_skip, "skip", "skip current track", group=GROUP)
     a("pause", c_pause, "pause", "pause", group=GROUP)
     a("resume", c_resume, "resume", "resume", group=GROUP)
