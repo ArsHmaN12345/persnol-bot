@@ -130,7 +130,7 @@ class JoinToCreate(BaseCog):
                 if channel is None or not message_id:
                     continue
                 message = await channel.fetch_message(message_id)
-                await message.edit(embed=self.panel_payload(), view=PanelView(self))
+                await message.edit(embed=self.panel_payload(), view=PanelView(self), attachments=[])
             except discord.NotFound:
                 continue
             except (discord.HTTPException, TypeError, ValueError) as e:
@@ -667,7 +667,7 @@ class JoinToCreate(BaseCog):
             try:
                 old_msg = await old_ch.fetch_message(old_id)
                 if old_ch.id == channel.id:
-                    await old_msg.edit(embed=embed, view=PanelView(self))
+                    await old_msg.edit(embed=embed, view=PanelView(self), attachments=[])
                     msg = old_msg
                 else:
                     await old_msg.delete()
