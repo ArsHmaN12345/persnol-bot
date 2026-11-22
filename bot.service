@@ -1,0 +1,17 @@
+# Alternative to Docker: copy to /etc/systemd/system/dragbot.service
+# then: sudo systemctl daemon-reload && sudo systemctl enable --now dragbot
+[Unit]
+Description=Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bot
+WorkingDirectory=/opt/dragbot
+EnvironmentFile=/opt/dragbot/.env
+ExecStart=/opt/dragbot/venv/bin/python main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
