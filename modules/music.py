@@ -844,17 +844,6 @@ class Music(BaseCog):
         await self.leave_guild(ctx.guild)
         await ctx.send(embed=info_embed("👋 Left the voice channel. 24/7 mode is off."))
 
-    @commands.hybrid_command(name="help", description="Show the music commands")
-    async def help(self, ctx):
-        p = config.PREFIX
-        e = discord.Embed(title="🎵 Music commands", color=BLURPLE,
-                          description="Play from YouTube, YouTube Music, Spotify, Apple Music, SoundCloud and more.")
-        e.add_field(name="Play", value=f"`{p}play <name or link>`\n`{p}queue`  `{p}nowplaying`", inline=False)
-        e.add_field(name="Control", value=f"`{p}skip`  `{p}pause`  `{p}resume`  `{p}stop`  `{p}leave`", inline=False)
-        e.add_field(name="Tune", value=f"`{p}volume <0-200>`  `{p}loop off|track|queue`\n`{p}shuffle`  `{p}remove <number>`", inline=False)
-        e.set_footer(text="Tip: use the buttons under the Now Playing card for volume, pause, skip and more.")
-        await ctx.send(embed=e)
-
 
 # ======================= console commands =======================
 def _cog(bot):
