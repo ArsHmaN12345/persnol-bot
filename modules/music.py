@@ -108,21 +108,44 @@ def np_embed(p, track):
 
 # ======================= sources =======================
 def extract(query, flat=False):
-    opts = dict(YTDL_OPTS)
-    if config.YTDL_COOKIEFILE:
-        opts["cookiefile"] = config.YTDL_COOKIEFILE
+    """Extract metadata, retrying without cookies when YouTube rejects them."""
+    base = dict(YTDL_OPTS)
     if flat:
-        opts.update(extract_flat="in_playlist", noplaylist=False)
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(query, download=False)
-    except yt_dlp.utils.DownloadError as e:
-        msg = str(e).replace("ERROR: ", "").splitlines()[0]
-        raise MusicError(msg[:220])
-    except OSError as e:
-        if "File name too long" in str(e):
-            raise MusicError("YouTube cookie configuration is invalid. Use YTDL_COOKIES for cookie text, or clear it.")
-        raise MusicError(f"Music search failed: {e}")
+        base.update(extract_flat="in_playlist", noplaylist=False)
+
+    attempts = []
+    if config.YTDL_COOKIEFILE:
+        with_cookies = dict(base)
+        with_cookies["cookiefile"] = config.YTDL_COOKIEFILE
+        attempts.append(with_cookies)
+    # A stale/partially exported cookie file can make YouTube return 403 for
+    # search itself. Keep search usable by retrying as an anonymous request.
+    attempts.append(base)
+
+    last_error = None
+    for opts in attempts:
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(query, download=False)
+        except OSError as e:
+            if "File name too long" in str(e):
+                raise MusicError(
+                    "YouTube cookie configuration is invalid. Put Netscape cookie text in YTDL_COOKIES, or clear it."
+                )
+            last_error = e
+        except yt_dlp.utils.DownloadError as e:
+            last_error = e
+
+    msg = str(last_error).replace("ERROR: ", "").splitlines()[0] if last_error else "unknown error"
+    if "403" in msg or "Forbidden" in msg:
+        raise MusicError(
+            "YouTube rejected this request (HTTP 403). Refresh YTDL_COOKIES with a new Netscape cookies.txt, then redeploy."
+        )
+    if "Sign in to confirm" in msg or "not a bot" in msg:
+        raise MusicError(
+            "YouTube requires authentication here. Add fresh Netscape cookies.txt contents to YTDL_COOKIES."
+        )
+    raise MusicError(msg[:220])
 
 
 # ---- Spotify (metadata only, then matched on YouTube) ----
