@@ -36,6 +36,14 @@ YTDL_OPTS = {
     "no_warnings": True,
     "default_search": "auto",
     "playlistend": config.MAX_QUEUE,
+    # Railway/datacenter IPs are often challenged by the default web client. These
+    # clients provide a better no-cookie fallback; yt-dlp still uses cookies when
+    # YTDL_COOKIES is configured.
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["web_safari", "web_embedded", "tv"],
+        },
+    },
 }
 STAY_GRACE = 45        # seconds a connection may stay down before the 24/7 watchdog steps in
 STAY_INTERVAL = 15     # how often the watchdog checks
