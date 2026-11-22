@@ -7,7 +7,7 @@ from ui import BaseCog, RED, BLURPLE, emb
 
 CATEGORIES = {
     "home": ("Bot Help", "Choose a category below."),
-    "music": ("Music", "`/play` `/join` `/leave` `/queue` `/nowplaying`\n`/skip` `/pause` `/resume` `/stop`\n`/volume` `/loop` `/shuffle` `/remove` `/testaudio`"),
+    "music": ("Music", "`/spotifyconnect` (owner setup) `/play` `/join` `/leave` `/queue` `/nowplaying`\n`/skip` `/pause` `/resume` `/stop`\n`/volume` `/loop` `/shuffle` `/remove` `/testaudio`\nConnect once to read Spotify playlists you own or collaborate on. Audio is matched from SoundCloud."),
     "voice": ("Voice", "`/moveall` `/party` `/mute` `/unmute` `/deafen` `/undeafen`\n`/automute` `/automutes`\n`/jtc setup` `/jtc settings` `/jtc status` `/jtc panel` `/jtc disable`\n`/voice name|limit|privacy|waiting|chat|trust|untrust|invite|kick|block|unblock|claim|transfer|info|save|reset|delete`"),
     "moderation": ("Moderation", "`/kick` `/ban` `/unban` `/banlist`\n`/timeout` `/untimeout` `/timeouts`"),
     "automation": ("Automation", "`/setchannels` `/drag` `/autodc` `/stopautodc`\n`/undc` `/stopdc` `/undrag` `/undragall` `/targets` `/dragdelay`"),
