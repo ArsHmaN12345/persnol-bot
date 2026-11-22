@@ -61,10 +61,13 @@ class DragBot(commands.Bot):
         await self.sync_slash([guild])
 
     async def on_tree_error(self, interaction, error):
-        if isinstance(error, app_commands.CheckFailure):
+        original = getattr(error, "original", error)
+        if isinstance(original, utils.BotError):
+            text = str(original)
+        elif isinstance(original, app_commands.CheckFailure):
             text = "🔒 Only the owner and trusted users can use this command."
         else:
-            print(f"[slash] {type(error).__name__}: {error}")
+            print(f"[slash] {type(original).__name__}: {original}")
             text = "❌ Something went wrong."
         try:
             if interaction.response.is_done():
