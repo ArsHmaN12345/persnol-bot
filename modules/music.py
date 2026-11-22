@@ -871,6 +871,7 @@ class Music(BaseCog):
             raise MusicError("Stop the current audio first, then run the sound test.")
 
         first_audio = asyncio.Event()
+        test_loop = asyncio.get_running_loop()
         source = ProbedVolumeSource(
             discord.FFmpegPCMAudio(
                 "sine=frequency=880:duration=4",
@@ -878,7 +879,7 @@ class Music(BaseCog):
                 options="-vn",
             ),
             volume=0.25,
-            on_audio=lambda: asyncio.get_running_loop().call_soon_threadsafe(first_audio.set),
+            on_audio=lambda: test_loop.call_soon_threadsafe(first_audio.set),
         )
         kbps = max(16, min(config.AUDIO_BITRATE, voice.channel.bitrate // 1000))
         try:
