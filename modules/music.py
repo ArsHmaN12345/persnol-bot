@@ -869,20 +869,36 @@ class Music(BaseCog):
         vc = ctx.guild.voice_client
         if vc.is_playing() or vc.is_paused():
             raise MusicError("Stop the current audio first, then run the sound test.")
+
+        first_audio = asyncio.Event()
+        source = ProbedVolumeSource(
+            discord.FFmpegPCMAudio(
+                "sine=frequency=880:duration=4",
+                before_options="-f lavfi",
+                options="-vn",
+            ),
+            volume=0.25,
+            on_audio=lambda: asyncio.get_running_loop().call_soon_threadsafe(first_audio.set),
+        )
+        kbps = max(16, min(config.AUDIO_BITRATE, voice.channel.bitrate // 1000))
         try:
-            source = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(
-                    "sine=frequency=880:duration=4",
-                    before_options="-f lavfi",
-                    options="-vn",
-                ),
-                volume=0.25,
-            )
-            vc.play(source)
-        except (discord.ClientException, OSError) as e:
+            try:
+                vc.play(source, bitrate=kbps, application="audio", fec=True, signal_type="music")
+            except TypeError:
+                vc.play(source)
+        except (discord.ClientException, OSError, RuntimeError) as e:
             raise MusicError(f"Discord audio test could not start: {e}")
+
+        try:
+            await asyncio.wait_for(first_audio.wait(), timeout=3)
+        except asyncio.TimeoutError:
+            await ctx.send(embed=info_embed(
+                "⚠️ FFmpeg did not produce audio frames. Check the Railway FFmpeg runtime logs.",
+                YELLOW,
+            ))
+            return
         await ctx.send(embed=info_embed(
-            "🔔 Playing a short test tone. If you hear it, Discord voice output works and the remaining issue is the music stream source.",
+            "✅ FFmpeg produced audio and the bot sent it to Discord. If you still hear nothing, check the client output device, server mute, and voice connection.",
             GREEN,
         ))
 
