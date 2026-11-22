@@ -307,10 +307,21 @@ async def expand(query, requester):
             return [Track.from_info(e, requester) for e in info["entries"] if e][:config.MAX_QUEUE]
         return [Track.from_info(info, requester)]
 
-    info = await loop.run_in_executor(None, extract, f"ytsearch1:{query}")
+    try:
+        info = await loop.run_in_executor(None, extract, f"ytsearch1:{query}")
+    except MusicError as youtube_error:
+        # Railway IPs are increasingly challenged by YouTube search. Fall back
+        # to SoundCloud for plain text searches so music can still play.
+        if "403" not in str(youtube_error) and "Forbidden" not in str(youtube_error):
+            raise
+        try:
+            info = await loop.run_in_executor(None, extract, f"scsearch1:{query}")
+        except MusicError:
+            raise youtube_error
+
     entries = [e for e in (info.get("entries") or []) if e]
     if not entries:
-        raise MusicError("No results.")
+        raise MusicError("No results from YouTube or SoundCloud.")
     return [Track.from_info(entries[0], requester)]
 
 
