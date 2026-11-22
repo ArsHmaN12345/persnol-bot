@@ -1,6 +1,4 @@
-"""Music module: YouTube / YouTube Music / SoundCloud / etc. links and search,
-plus Spotify and Apple Music links (resolved to a YouTube audio match).
-Audio is encoded to Opus by discord.py at the bitrate set in config.AUDIO_BITRATE."""
+"""Music module for online sources, encoded to Discord-ready Opus by FFmpeg."""
 import asyncio
 import base64
 import collections
@@ -365,6 +363,7 @@ class GuildPlayer:
         self.panel = None
         self.kbps = config.AUDIO_BITRATE
         self.restart_requested = False
+        self.restart_paused = False
         self.has_tracks = asyncio.Event()
         self.next_event = asyncio.Event()
         self.task = asyncio.create_task(self.run())
@@ -517,6 +516,9 @@ class GuildPlayer:
                     # FFmpegOpusAudio already encoded the stream; send its
                     # Opus packets without a second encoder pass.
                     vc.play(source, after=after)
+                    if self.restart_paused:
+                        self.restart_paused = False
+                        vc.pause()
                 except Exception as e:
                     await self.say(f"❌ Playback failed: {e}")
                     self.current = None
@@ -604,9 +606,10 @@ class GuildPlayer:
             raise MusicError("Volume must be 0-200.")
         self.volume = percent / 100
         vc = self.guild.voice_client
-        if vc and self.current and vc.is_playing():
+        if vc and self.current and (vc.is_playing() or vc.is_paused()):
             # FFmpeg encodes directly to Opus; apply volume in its filter and
             # restart the current track so the new setting takes effect.
+            self.restart_paused = vc.is_paused()
             self.restart_requested = True
             vc.stop()
 
