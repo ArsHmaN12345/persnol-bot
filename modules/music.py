@@ -466,7 +466,8 @@ class GuildPlayer:
                     )
                     before_options = FFMPEG_BEFORE
                     if header_blob:
-                        before_options += f" -headers {shlex.quote(header_blob + chr(92) + "r" + chr(92) + "n")}"
+                        header_blob += "\\r\\n"
+                        before_options += f" -headers {shlex.quote(header_blob)}"
                     source = discord.PCMVolumeTransformer(
                         discord.FFmpegPCMAudio(
                             track.stream_url,
