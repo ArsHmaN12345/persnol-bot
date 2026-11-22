@@ -22,8 +22,8 @@ VC_STATUS_TEMPLATE = "🎵 {title}"   # {title} = song name
 SET_PRESENCE = True         # show "Listening to <song>" on the bot's profile
 
 # Needed only for Spotify links (free): https://developer.spotify.com/dashboard
-SPOTIFY_CLIENT_ID = os.getenv("5d4af7910ed14095af7db11325f5711c", "")
-SPOTIFY_CLIENT_SECRET = os.getenv("f55b9c05e8674acda07d04f1e4ff8cbe", "")
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 
 # Optional: cookies.txt for yt-dlp. Helps when YouTube says "Sign in to confirm you're not a bot"
 # (common on VPS/datacenter IPs). Use a throwaway Google account, never your main one.
