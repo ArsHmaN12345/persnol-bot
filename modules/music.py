@@ -857,6 +857,35 @@ class Music(BaseCog):
             e = discord.Embed(title="➕ Added to queue", description=f"**{n}** tracks added.", color=GREEN)
         await ctx.send(embed=e)
 
+    @commands.hybrid_command(name="testaudio", aliases=["audiotest"], description="Play a short tone to test Discord audio")
+    async def testaudio(self, ctx):
+        """Play a local tone to isolate voice output from online music sources."""
+        voice = getattr(ctx.author, "voice", None)
+        if not voice or not voice.channel:
+            raise MusicError("Join a voice channel first.")
+        await self.connect(ctx.guild, voice.channel)
+        if not voice.channel.permissions_for(ctx.guild.me).speak:
+            raise MusicError(f"I can join **{voice.channel.name}**, but I need the **Speak** permission there.")
+        vc = ctx.guild.voice_client
+        if vc.is_playing() or vc.is_paused():
+            raise MusicError("Stop the current audio first, then run the sound test.")
+        try:
+            source = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(
+                    "sine=frequency=880:duration=4",
+                    before_options="-f lavfi",
+                    options="-vn",
+                ),
+                volume=0.25,
+            )
+            vc.play(source)
+        except (discord.ClientException, OSError) as e:
+            raise MusicError(f"Discord audio test could not start: {e}")
+        await ctx.send(embed=info_embed(
+            "🔔 Playing a short test tone. If you hear it, Discord voice output works and the remaining issue is the music stream source.",
+            GREEN,
+        ))
+
     @commands.hybrid_command(name="skip", aliases=["s"], description="Skip the current song")
     async def skip(self, ctx):
         self.player(ctx.guild).skip()
