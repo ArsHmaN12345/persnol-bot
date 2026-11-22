@@ -512,13 +512,12 @@ class GuildPlayer:
                         print(f"[music] player error: {err}")
                     loop.call_soon_threadsafe(ev.set)
 
+                pause_after_start = self.restart_paused
+                self.restart_paused = False
                 try:
                     # FFmpegOpusAudio already encoded the stream; send its
                     # Opus packets without a second encoder pass.
                     vc.play(source, after=after)
-                    if self.restart_paused:
-                        self.restart_paused = False
-                        vc.pause()
                 except Exception as e:
                     await self.say(f"❌ Playback failed: {e}")
                     self.current = None
@@ -536,6 +535,8 @@ class GuildPlayer:
                 )
                 for task in pending:
                     task.cancel()
+                if first_audio.is_set() and pause_after_start and vc.is_playing():
+                    vc.pause()
                 if not first_audio.is_set():
                     await self.say(
                         f"🔇 **{track.title}** started but FFmpeg produced no audio. "
