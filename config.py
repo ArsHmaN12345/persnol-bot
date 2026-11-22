@@ -6,7 +6,7 @@ TOKEN = os.getenv("DISCORD_TOKEN", "PUT_YOUR_NEW_BOT_TOKEN_HERE")
 
 # ---------- GENERAL ----------
 PREFIX = "!"                                        # prefix for text commands (slash commands always work too)
-OWNER_ID = int(os.getenv("OWNER_ID", "958101166896582666"))   # the ONLY person with full control
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))   # the ONLY person with full control
 # Everyone else is ignored unless the owner trusts them:  /trust @user   (or  trust <user>  in CMD)
 
 # ---------- DRAG MODULE ----------
@@ -52,3 +52,5 @@ if _cookies and not YTDL_COOKIEFILE:
     YTDL_COOKIEFILE = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
     with open(YTDL_COOKIEFILE, "w", encoding="utf-8") as _f:
         _f.write(_cookies if _cookies.endswith("\n") else _cookies + "\n")
+elif YTDL_COOKIEFILE and ("; " in YTDL_COOKIEFILE or "\n" in YTDL_COOKIEFILE or len(YTDL_COOKIEFILE) > 240):
+    raise RuntimeError("YTDL_COOKIEFILE must be a path. Put cookie text in YTDL_COOKIES instead.")
