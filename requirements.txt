@@ -1,2 +1,2 @@
-discord.py[voice]
+discord.py[voice]>=2.4,<3
 yt-dlp[default,curl-cffi]
