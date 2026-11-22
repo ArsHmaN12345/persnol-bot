@@ -12,9 +12,10 @@ Owner = full control. Trusted users = music, moveall, party, mute/deafen, AI. Ev
 Owner only: drag/autodc/automute, kick/ban/unban/timeout, /jtc setup, roulette, trust.
 
 === SLASH COMMANDS (also work as !text commands) ===
+Help:    /help [home|music|voice|moderation|automation|tools] (buttons + direct categories)
 Music:  /join (stays 24/7) /play /skip /pause /resume /stop /queue /nowplaying /volume /loop /shuffle /remove /leave
 Voice:  /moveall (asks where) /party /mute /unmute /deafen /undeafen /automute /automutes
-Drag:   /setchannels /drag /autodc /undrag /undragall /targets /dragdelay [seconds]
+Drag:   /setchannels /drag /autodc /stopautodc (/undc, /stopdc) /undrag /undragall /targets /dragdelay [seconds]
 Mod:    /kick /ban /unban /banlist /timeout /untimeout /timeouts
 Rooms:  /jtc setup | settings | status | panel | disable    /voice <name|limit|privacy|waiting|chat|trust|...>
 AI:     /ai <anything>   /voicecmd <audio>   /aichannel   /aireset   or  @mention the bot   or  'ai ...' in CMD
@@ -72,7 +73,7 @@ in your language. Audio is sent to Google for that one request and is not stored
 1. Put this folder in a PRIVATE GitHub repo (.gitignore keeps .env / data.json out).
 2. Railway -> New Project -> Deploy from GitHub repo (builds the Dockerfile).
 3. Variables:  DISCORD_TOKEN, OWNER_ID, GEMINI_API_KEY, DATA_FILE=/data/data.json,
-   (optional) SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, YTDL_COOKIES
+   (optional) SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, YTDL_COOKIES (cookie text; never put cookie text in YTDL_COOKIEFILE)
 4. Add a Volume mounted at /data  (keeps trust list, targets, voice rooms across deploys)
 5. Logs should show "Logged in as ..." and "running headless" (normal on Railway).
 
