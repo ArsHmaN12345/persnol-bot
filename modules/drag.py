@@ -62,6 +62,14 @@ async def op_autodc(cog, guild, member):
             pass
     return f"⛔ Auto-disconnect set on **{member.display_name}**."
 
+def op_stop_autodc(cog, guild, member):
+    if get_mode(guild.id, member.id) != "disconnect":
+        raise BotError(f"Auto-disconnect isn't set on **{member.display_name}**.")
+    data["targets"].get(str(guild.id), {}).pop(str(member.id), None)
+    cog.stop(guild.id, member.id)
+    save_data()
+    return f"✅ Auto-disconnect stopped for **{member.display_name}**."
+
 
 def op_undrag(cog, guild, member):
     data["targets"].get(str(guild.id), {}).pop(str(member.id), None)
@@ -180,6 +188,12 @@ class Drag(BaseCog):
     @app_commands.describe(member="Who to disconnect")
     async def autodc(self, ctx, member: discord.Member):
         await ctx.send(embed=emb(await op_autodc(self, ctx.guild, member), GREEN))
+
+    @commands.hybrid_command(name="stopautodc", aliases=["undc", "stopdc"],
+                             description="Stop auto-disconnecting a member")
+    @app_commands.describe(member="Who to stop disconnecting")
+    async def stopautodc(self, ctx, member: discord.Member):
+        await ctx.send(embed=emb(op_stop_autodc(self, ctx.guild, member), GREEN))
 
     @commands.hybrid_command(name="undrag", aliases=["untarget"], description="Remove a member from the drag/disconnect list")
     @app_commands.describe(member="Who to remove")
