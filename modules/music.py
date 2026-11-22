@@ -47,7 +47,6 @@ YTDL_OPTS = {
 STAY_GRACE = 45        # seconds a connection may stay down before the 24/7 watchdog steps in
 STAY_INTERVAL = 15     # how often the watchdog checks
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-FFMPEG_OPTS = "-vn"
 
 
 def fmt(sec):
@@ -497,6 +496,7 @@ class GuildPlayer:
                         discord.FFmpegOpusAudio(
                             track.stream_url,
                             bitrate=kbps,
+                            codec="libopus",
                             before_options=before_options,
                             options=f"-vn -af volume={self.volume}",
                         ),
@@ -891,6 +891,7 @@ class Music(BaseCog):
             discord.FFmpegOpusAudio(
                 "sine=frequency=880:duration=4",
                 bitrate=kbps,
+                codec="libopus",
                 before_options="-f lavfi",
                 options="-af volume=0.25",
             ),
@@ -910,7 +911,7 @@ class Music(BaseCog):
             ))
             return
         await ctx.send(embed=info_embed(
-            "✅ FFmpeg produced audio and the bot sent it to Discord. If you still hear nothing, check the client output device, server mute, and voice connection.",
+            "✅ FFmpeg produced Opus packets and voice playback started. If you still hear nothing, check the client output device, server mute, and voice connection.",
             GREEN,
         ))
 
