@@ -356,8 +356,6 @@ class GuildPlayer:
         self._status_off = False
         self.panel = None
         self.kbps = config.AUDIO_BITRATE
-        self.restart_requested = False
-        self.restart_paused = False
         self.has_tracks = asyncio.Event()
         self.next_event = asyncio.Event()
         self.task = asyncio.create_task(self.run())
@@ -487,14 +485,13 @@ class GuildPlayer:
                     first_audio = asyncio.Event()
                     kbps = max(16, min(config.AUDIO_BITRATE, vc.channel.bitrate // 1000))
                     self.kbps = kbps
+                    pcm = discord.FFmpegPCMAudio(
+                        track.stream_url,
+                        before_options=before_options,
+                        options="-vn",
+                    )
                     source = ProbedAudioSource(
-                        discord.FFmpegOpusAudio(
-                            track.stream_url,
-                            bitrate=kbps,
-                            # Leave codec unset: explicit "libopus" is treated as stream copy.
-                            before_options=before_options,
-                            options=f"-vn -af volume={self.volume}",
-                        ),
+                        discord.PCMVolumeTransformer(pcm, volume=self.volume),
                         on_audio=lambda: loop.call_soon_threadsafe(first_audio.set),
                     )
                 except (discord.ClientException, OSError) as e:
@@ -510,12 +507,9 @@ class GuildPlayer:
                         print(f"[music] player error: {err}")
                     loop.call_soon_threadsafe(ev.set)
 
-                pause_after_start = self.restart_paused
-                self.restart_paused = False
                 try:
-                    # FFmpegOpusAudio already encoded the stream; send its
-                    # Opus packets without a second encoder pass.
-                    vc.play(source, after=after)
+                    # Let discord.py encode PCM to Opus and apply the channel-aware bitrate.
+                    vc.play(source, after=after, bitrate=kbps, signal_type="music")
                 except Exception as e:
                     await self.say(f"❌ Playback failed: {e}")
                     self.current = None
@@ -533,8 +527,6 @@ class GuildPlayer:
                 )
                 for task in pending:
                     task.cancel()
-                if first_audio.is_set() and pause_after_start and vc.is_playing():
-                    vc.pause()
                 if not first_audio.is_set():
                     detail = f" ({player_errors[-1]})" if player_errors else ""
                     await self.say(
@@ -554,11 +546,6 @@ class GuildPlayer:
                             self.queue.clear()
                             break
                 await self.end_panel()
-                if self.restart_requested:
-                    self.restart_requested = False
-                    self.current = None
-                    self.queue.appendleft(track)
-                    continue
                 self.current = None
                 if self.loop_mode == "track" and not self.skipped:
                     self.queue.appendleft(track)
@@ -607,11 +594,9 @@ class GuildPlayer:
         self.volume = percent / 100
         vc = self.guild.voice_client
         if vc and self.current and (vc.is_playing() or vc.is_paused()):
-            # FFmpeg encodes directly to Opus; apply volume in its filter and
-            # restart the current track so the new setting takes effect.
-            self.restart_paused = vc.is_paused()
-            self.restart_requested = True
-            vc.stop()
+            source = vc.source
+            if isinstance(source, ProbedAudioSource) and isinstance(source.original, discord.PCMVolumeTransformer):
+                source.original.volume = self.volume
 
     def set_loop(self, mode):
         if mode not in ("off", "track", "queue"):
@@ -873,7 +858,7 @@ class Music(BaseCog):
 
     @commands.hybrid_command(name="testaudio", aliases=["audiotest"], description="Play a short tone to test Discord audio")
     async def testaudio(self, ctx):
-        """Play a local tone to isolate Discord voice output from online sources."""
+        """Play a local tone through the same PCM-to-Opus path as music."""
         if ctx.interaction and not ctx.interaction.response.is_done():
             await ctx.interaction.response.defer(ephemeral=True, thinking=True)
         voice = getattr(ctx.author, "voice", None)
@@ -888,16 +873,18 @@ class Music(BaseCog):
 
         first_audio = asyncio.Event()
         test_loop = asyncio.get_running_loop()
+        test_bitrate = max(16, min(config.AUDIO_BITRATE, voice.channel.bitrate // 1000))
+        pcm = discord.FFmpegPCMAudio(
+            "sine=frequency=880:duration=4",
+            before_options="-f lavfi",
+            options="-vn",
+        )
         source = ProbedAudioSource(
-            discord.FFmpegPCMAudio(
-                "sine=frequency=880:duration=4",
-                before_options="-f lavfi",
-                options="-af volume=0.25",
-            ),
+            discord.PCMVolumeTransformer(pcm, volume=0.25),
             on_audio=lambda: test_loop.call_soon_threadsafe(first_audio.set),
         )
         try:
-            vc.play(source)
+            vc.play(source, bitrate=test_bitrate, signal_type="music")
         except (discord.DiscordException, OSError, RuntimeError) as e:
             raise MusicError(f"Discord audio test could not start: {e}") from e
 
@@ -916,7 +903,7 @@ class Music(BaseCog):
             return
         await ctx.send(
             embed=info_embed(
-                "FFmpeg produced audio frames and Discord voice playback started. If you still hear nothing, check the voice output device and whether the bot is server-muted.",
+                "PCM audio reached Discord's Opus encoder. If you still hear nothing, check the voice output device and whether the bot is server-muted.",
                 GREEN,
             ),
             ephemeral=ctx.interaction is not None,
