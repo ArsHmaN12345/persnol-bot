@@ -121,10 +121,8 @@ def _is_soundcloud_url(query):
 def extract(query, flat=False):
     """Extract track metadata and streams without using YouTube or browser cookies."""
     base = dict(YTDL_OPTS)
-    if query.lower().startswith("scsearch") or _is_soundcloud_url(query):
-        # SoundCloud's anti-bot edge may reject generic HTTP fingerprints.
-        # yt-dlp's SoundCloud extractor uses this when curl-cffi is installed.
-        base["impersonate"] = "chrome"
+    # The SoundCloud extractor chooses its own supported browser target when
+    # curl-cffi is installed; raw strings are invalid in the Python API here.
     if flat:
         base.update(extract_flat="in_playlist", noplaylist=False)
 
