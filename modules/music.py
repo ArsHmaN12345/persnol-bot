@@ -31,7 +31,7 @@ class MusicError(BotError):
 
 
 YTDL_OPTS = {
-    "format": "bestaudio[acodec=opus]/bestaudio/best",   # prefer native Opus (best quality)
+    "format": "bestaudio[protocol=https][acodec=opus]/bestaudio[protocol=https]/bestaudio[acodec=opus]/bestaudio/best",   # prefer direct HTTPS audio over HLS
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -42,7 +42,7 @@ YTDL_OPTS = {
     # YTDL_COOKIES is configured.
     "extractor_args": {
         "youtube": {
-            "player_client": ["web_safari", "web_embedded", "tv"],
+            "player_client": ["tv", "web_embedded", "web_safari"],
         },
     },
 }
