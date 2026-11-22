@@ -491,7 +491,8 @@ class GuildPlayer:
                         discord.FFmpegOpusAudio(
                             track.stream_url,
                             bitrate=kbps,
-                            # Leave codec unset: explicit "libopus" is treated as stream copy.\n                            before_options=before_options,
+                            # Leave codec unset: explicit "libopus" is treated as stream copy.
+                            before_options=before_options,
                             options=f"-vn -af volume={self.volume}",
                         ),
                         on_audio=lambda: loop.call_soon_threadsafe(first_audio.set),
