@@ -35,14 +35,6 @@ YTDL_OPTS = {
     "no_warnings": True,
     "default_search": "auto",
     "playlistend": config.MAX_QUEUE,
-    # Railway/datacenter IPs are often challenged by the default web client. These
-    # clients provide a better no-cookie fallback; yt-dlp still uses cookies when
-    # YTDL_COOKIES is configured.
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["tv", "web_embedded", "web_safari"],
-        },
-    },
 }
 STAY_GRACE = 45        # seconds a connection may stay down before the 24/7 watchdog steps in
 STAY_INTERVAL = 15     # how often the watchdog checks
@@ -121,6 +113,7 @@ def extract(query, flat=False):
     attempts.append(base)
 
     last_error = None
+    cookie_error = None
     for opts in attempts:
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -131,17 +124,27 @@ def extract(query, flat=False):
                     "YouTube cookie configuration is invalid. Put Netscape cookie text in YTDL_COOKIES, or clear it."
                 )
             last_error = e
+            if opts.get("cookiefile"):
+                cookie_error = e
         except yt_dlp.utils.DownloadError as e:
             last_error = e
+            if opts.get("cookiefile"):
+                cookie_error = e
 
     msg = str(last_error).replace("ERROR: ", "").splitlines()[0] if last_error else "unknown error"
+    auth_error = "Sign in to confirm" in msg or "not a bot" in msg
+    if auth_error and config.YTDL_COOKIEFILE and cookie_error:
+        raise MusicError(
+            "YouTube rejected the configured cookies. Replace YTDL_COOKIES with a fresh Netscape-format cookies.txt from a signed-in account. "
+            "If it still fails, YouTube may require a PO token for Railway."
+        )
     if "403" in msg or "Forbidden" in msg:
         raise MusicError(
-            "YouTube rejected this request (HTTP 403). Refresh YTDL_COOKIES with a new Netscape cookies.txt, then redeploy."
+            "YouTube rejected this request (HTTP 403). Check that YTDL_COOKIES contains a fresh Netscape-format cookies.txt, then redeploy."
         )
-    if "Sign in to confirm" in msg or "not a bot" in msg:
+    if auth_error:
         raise MusicError(
-            "YouTube requires authentication here. Add fresh Netscape cookies.txt contents to YTDL_COOKIES."
+            "YouTube requires authentication here. Add fresh Netscape-format cookies.txt contents to YTDL_COOKIES."
         )
     raise MusicError(msg[:220])
 
