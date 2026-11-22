@@ -838,6 +838,9 @@ class Music(BaseCog):
         permissions = voice.channel.permissions_for(ctx.guild.me)
         if not permissions.speak:
             raise MusicError(f"I can join **{voice.channel.name}**, but I need the **Speak** permission there.")
+        member_voice = ctx.guild.me.voice
+        if member_voice and member_voice.mute:
+            raise MusicError("I am server-muted in this voice channel. Ask a server admin to unmute me.")
         p = self.player(ctx.guild)
         p.text_channel = ctx.channel
         tracks = await expand(query, ctx.author.display_name)
@@ -864,14 +867,21 @@ class Music(BaseCog):
         voice = getattr(ctx.author, "voice", None)
         if not voice or not voice.channel:
             raise MusicError("Join a voice channel first.")
+        if voice.deaf or voice.self_deaf:
+            raise MusicError("You are deafened in voice. Undeafen yourself to hear the audio test.")
         await self.connect(ctx.guild, voice.channel)
         if not voice.channel.permissions_for(ctx.guild.me).speak:
             raise MusicError(f"I can join **{voice.channel.name}**, but I need the **Speak** permission there.")
+        member_voice = ctx.guild.me.voice
+        if member_voice and member_voice.mute:
+            raise MusicError("I am server-muted in this voice channel. Ask a server admin to unmute me.")
         vc = ctx.guild.voice_client
         if vc.is_playing() or vc.is_paused():
             raise MusicError("Stop the current audio first, then run the sound test.")
 
         first_audio = asyncio.Event()
+        playback_finished = asyncio.Event()
+        playback_errors = []
         test_loop = asyncio.get_running_loop()
         test_bitrate = max(16, min(config.AUDIO_BITRATE, voice.channel.bitrate // 1000))
         pcm = discord.FFmpegPCMAudio(
@@ -883,27 +893,41 @@ class Music(BaseCog):
             discord.PCMVolumeTransformer(pcm, volume=0.25),
             on_audio=lambda: test_loop.call_soon_threadsafe(first_audio.set),
         )
+
+        def after(error):
+            if error:
+                detail = f"{type(error).__name__}: {error}"
+                playback_errors.append(detail)
+                print(f"[music] /testaudio voice sender error: {detail}")
+            test_loop.call_soon_threadsafe(playback_finished.set)
+
         try:
-            vc.play(source, bitrate=test_bitrate, signal_type="music")
+            vc.play(source, after=after, bitrate=test_bitrate, signal_type="music")
         except (discord.DiscordException, OSError, RuntimeError) as e:
             raise MusicError(f"Discord audio test could not start: {e}") from e
 
         try:
             await asyncio.wait_for(first_audio.wait(), timeout=4)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             if vc.is_playing():
                 vc.stop()
-            await ctx.send(
-                embed=info_embed(
-                    "FFmpeg did not produce PCM audio frames. Check the Railway FFmpeg runtime logs.",
-                    YELLOW,
-                ),
-                ephemeral=ctx.interaction is not None,
-            )
-            return
+            if playback_errors:
+                raise MusicError(f"Discord voice sender error: {playback_errors[-1]}") from e
+            raise MusicError("FFmpeg did not produce PCM audio frames. Check the Railway runtime logs.") from e
+
+        try:
+            await asyncio.wait_for(playback_finished.wait(), timeout=6)
+        except asyncio.TimeoutError as e:
+            if vc.is_playing():
+                vc.stop()
+            raise MusicError("The 4-second test tone did not finish. Check the Railway runtime logs.") from e
+        if playback_errors:
+            raise MusicError(f"Discord voice sender error: {playback_errors[-1]}")
+
         await ctx.send(
             embed=info_embed(
-                "PCM audio reached Discord's Opus encoder. If you still hear nothing, check the voice output device and whether the bot is server-muted.",
+                "The full 4-second tone finished through the bot's voice sender. "
+                "If you heard nothing, set my Discord User Volume to 100% and check your output device.",
                 GREEN,
             ),
             ephemeral=ctx.interaction is not None,
