@@ -111,6 +111,10 @@ def extract(query, flat=False):
     except yt_dlp.utils.DownloadError as e:
         msg = str(e).replace("ERROR: ", "").splitlines()[0]
         raise MusicError(msg[:220])
+    except OSError as e:
+        if "File name too long" in str(e):
+            raise MusicError("YouTube cookie configuration is invalid. Use YTDL_COOKIES for cookie text, or clear it.")
+        raise MusicError(f"Music search failed: {e}")
 
 
 # ---- Spotify (metadata only, then matched on YouTube) ----
@@ -410,12 +414,24 @@ class GuildPlayer:
                 self.current = track
                 self.skipped = False
                 self.next_event.clear()
-                source = discord.PCMVolumeTransformer(
-                    discord.FFmpegPCMAudio(track.stream_url, before_options=FFMPEG_BEFORE, options=FFMPEG_OPTS),
-                    volume=self.volume,
-                )
-                kbps = max(16, min(config.AUDIO_BITRATE, vc.channel.bitrate // 1000))
-                self.kbps = kbps
+                try:
+                    source = discord.PCMVolumeTransformer(
+                        discord.FFmpegPCMAudio(
+                            track.stream_url,
+                            before_options=FFMPEG_BEFORE,
+                            options=FFMPEG_OPTS,
+                        ),
+                        volume=self.volume,
+                    )
+                    kbps = max(16, min(config.AUDIO_BITRATE, vc.channel.bitrate // 1000))
+                    self.kbps = kbps
+                    encoder = getattr(vc, "encoder", None)
+                    if encoder is not None and hasattr(encoder, "bitrate"):
+                        encoder.bitrate = kbps * 1000
+                except (discord.ClientException, OSError) as e:
+                    await self.say(f"Playback could not start for {track.title}: {e}")
+                    self.current = None
+                    continue
 
                 def after(err, ev=self.next_event):
                     if err:
