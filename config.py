@@ -25,6 +25,15 @@ SET_PRESENCE = True         # show "Listening to <song>" on the bot's profile
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 
+# Music backend: auto uses Lavalink when available, then falls back to direct FFmpeg.
+# Set to "lavalink" to require Lavalink or "ffmpeg" to disable it.
+MUSIC_BACKEND = os.getenv("MUSIC_BACKEND", "auto").strip().lower()
+LAVALINK_HOST = os.getenv("LAVALINK_HOST", "")
+LAVALINK_PORT = int(os.getenv("LAVALINK_PORT", "2333"))
+LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD", "")
+LAVALINK_SECURE = os.getenv("LAVALINK_SECURE", "false").strip().lower() in ("1", "true", "yes", "on")
+LAVALINK_SEARCH = os.getenv("LAVALINK_SEARCH", "ytsearch,scsearch")
+
 # Optional: cookies.txt for yt-dlp. Helps when YouTube says "Sign in to confirm you're not a bot"
 # (common on VPS/datacenter IPs). Use a throwaway Google account, never your main one.
 YTDL_COOKIEFILE = os.getenv("YTDL_COOKIEFILE", "")
@@ -37,8 +46,8 @@ JTC_MAX_ROOMS = 50          # safety cap per server
 # ---------- AI (Google Gemini) ----------
 # NEVER write the key in this file. Set it as an environment variable / Railway variable:
 #   GEMINI_API_KEY = your key
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")   # auto-falls back to the newest Flash model
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip().strip('"').strip("'").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip().strip('"').strip("'").strip()   # auto-falls back to the newest Flash model
 AI_COOLDOWN = 4             # seconds between AI requests per user
 AI_MAX_STEPS = 6            # max tool-calling rounds per request
 AI_HISTORY_TURNS = 6        # how many past exchanges the AI remembers per user

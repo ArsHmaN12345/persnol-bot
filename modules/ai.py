@@ -59,6 +59,34 @@ class GeminiClient:
         if self.session and not self.session.closed:
             await self.session.close()
 
+    async def diagnose(self):
+        if not self.configured():
+            return "❌ GEMINI_API_KEY is missing."
+        s = await self._sess()
+        try:
+            async with s.get(f"{API_BASE}/models?pageSize=200", headers=self._headers()) as r:
+                status = r.status
+                text = await r.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            return f"❌ Could not reach Gemini: {type(e).__name__}"
+        if status == 200:
+            try:
+                models = json.loads(text).get("models", [])
+            except ValueError:
+                models = []
+            usable = []
+            for m in models:
+                name = m.get("name", "").split("/")[-1]
+                if "generateContent" in m.get("supportedGenerationMethods", []) and "flash" in name:
+                    usable.append(name)
+            sample = ", ".join(usable[:5]) or "none"
+            return f"✅ API key accepted. Configured model: `{self.model}`. Flash models: {sample}"
+        if status in (401, 403):
+            return "❌ API key was rejected (401/403). Check GEMINI_API_KEY and enable the Gemini API."
+        if status == 429:
+            return "❌ Gemini API quota/rate limit reached (429)."
+        return f"❌ Gemini API returned HTTP {status}. Check the key and API availability."
+
     async def _autodetect(self):
         """The configured model name was refused (404): pick the newest stable Flash model instead."""
         s = await self._sess()
@@ -651,6 +679,13 @@ class AI(BaseCog):
         self.history.pop((ctx.guild.id, ctx.author.id), None)
         await ctx.send(embed=emb("🧹 Memory cleared.", GREEN))
 
+    @commands.hybrid_command(name="aidiag", description="Check the Gemini AI API configuration")
+    @owner_only()
+    async def aidiag(self, ctx):
+        async with ctx.typing():
+            result = await self.client.diagnose()
+        await ctx.send(embed=emb(result, GREEN if result.startswith("✅") else RED))
+
     @commands.Cog.listener()
     async def on_message(self, message):
         if message.author.bot or message.guild is None or not self.bot.user:
@@ -709,11 +744,16 @@ async def c_aireset(bot, args):
     print("AI memory cleared.")
 
 
+async def c_aidiag(bot, args):
+    print((await bot.get_cog("AI").client.diagnose()).replace("**", "").replace("`", ""))
+
+
 async def setup(bot):
     await bot.add_cog(AI(bot))
     a = bot.add_console
     a("ai", c_ai, "ai <prompt>", "talk to the AI (it can run any bot command)", group=GROUP)
     a("aireset", c_aireset, "aireset", "clear the AI's memory", group=GROUP)
+    a("aidiag", c_aidiag, "aidiag", "check Gemini API configuration", group=GROUP)
 
 
 async def teardown(bot):
