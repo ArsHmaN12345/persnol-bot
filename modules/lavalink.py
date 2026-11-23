@@ -437,6 +437,9 @@ async def run_diag(bot):
 
 
 class LavalinkCog(BaseCog):
+    def __init__(self, bot):
+        self.bot = bot
+
     async def cog_load(self):
         if NODE is not None:
             NODE.start()
@@ -473,7 +476,7 @@ async def setup(bot):
     NODE = None
     if config.LAVALINK_HOST:
         NODE = Node(bot, config.LAVALINK_HOST, config.LAVALINK_PORT, config.LAVALINK_PASSWORD, config.LAVALINK_SECURE)
-    await bot.add_cog(LavalinkCog())
+    await bot.add_cog(LavalinkCog(bot))
     bot.add_console("musicdiag", c_musicdiag, "musicdiag", "check why music might not work", group=GROUP)
 
 
