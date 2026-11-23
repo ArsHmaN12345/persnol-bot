@@ -240,6 +240,7 @@ class LavalinkVoiceClient(discord.VoiceProtocol):
         self._paused = False
         self._after = None
         self._volume = 100
+        self._destroyed = False
         self.position, self.ping, self.last_exception = 0, -1, None
 
     # ----- discord.VoiceProtocol -----
@@ -264,6 +265,9 @@ class LavalinkVoiceClient(discord.VoiceProtocol):
 
     async def _teardown(self):
         """Idempotent: safe to call from disconnect() and again when Discord confirms we left."""
+        if self._destroyed:
+            return
+        self._destroyed = True
         self._connected = False
         self._connect_evt.clear()
         if self.node:
@@ -318,8 +322,16 @@ class LavalinkVoiceClient(discord.VoiceProtocol):
     async def play_track(self, track, volume_percent, after):
         self._after, self._playing, self._paused, self._volume = after, True, False, int(volume_percent)
         self.last_exception = None
-        await self.node.update_player(self.guild.id, {"track": {"encoded": track.encoded}, "volume": self._volume,
-                                                      "paused": False, "position": 0})
+        try:
+            await self.node.update_player(self.guild.id, {"track": {"encoded": track.encoded}, "volume": self._volume,
+                                                          "paused": False, "position": 0})
+        except LavalinkError:
+            self._playing = self._paused = False
+            after_error = self._after
+            self._after = None
+            if after_error is not None:
+                after_error(LavalinkError("Lavalink couldn't start the track."))
+            raise
 
     def _fire(self, coro):
         async def guard():
@@ -331,6 +343,7 @@ class LavalinkVoiceClient(discord.VoiceProtocol):
 
     def stop(self):
         self._fire(self.node.update_player(self.guild.id, {"track": {"encoded": None}}))
+        self._end_track("stopped")
 
     def pause(self):
         self._paused = True
@@ -361,6 +374,7 @@ class LavalinkVoiceClient(discord.VoiceProtocol):
         elif t == "TrackExceptionEvent":
             self.last_exception = (msg.get("exception") or {}).get("message", "unknown error")
             print(f"[lavalink] track failed: {self.last_exception}")
+            self._end_track("loadFailed")
         elif t == "TrackStuckEvent":
             print("[lavalink] track got stuck - skipping")
             self.stop()

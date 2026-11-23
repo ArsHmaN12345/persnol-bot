@@ -151,7 +151,7 @@ def spotify_tracks(kind, identifier):
 
 async def expand(query, requester):
     """Resolve a song search, supported link, or Spotify playlist through Lavalink."""
-    query = query.strip()
+    query = query.strip().strip("<>")
     if not query:
         raise MusicError("Enter a song name or a supported music link.")
 
@@ -589,6 +589,14 @@ class Music(BaseCog):
 
     async def connect(self, guild, channel):
         lv = _lavalink()
+        permissions = channel.permissions_for(guild.me)
+        if not (permissions.view_channel and permissions.connect):
+            raise MusicError(f"I need View Channel and Connect permission for {channel.name}.")
+        if not permissions.speak:
+            raise MusicError(f"I need Speak permission in {channel.name}.")
+        if channel.user_limit and len(channel.members) >= channel.user_limit:
+            if not permissions.move_members:
+                raise MusicError(f"{channel.name} is full.")
         voice = guild.voice_client
         if voice:
             if voice.is_connected():
@@ -689,9 +697,14 @@ class Music(BaseCog):
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
         if self.bot.user and member.id == self.bot.user.id and after.channel is None:
+            if str(member.guild.id) in data["stay"]:
+                return
             player = self.players.pop(member.guild.id, None)
             if player:
                 player.queue.clear()
+                await player.end_panel()
+                await player.set_status(None)
+                await player.set_presence(None)
                 player.task.cancel()
 
     @commands.hybrid_command(
