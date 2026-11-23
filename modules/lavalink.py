@@ -65,8 +65,10 @@ class Node:
             self._task = asyncio.create_task(self._run())
 
     async def close(self):
-        if self._task:
-            self._task.cancel()
+        task, self._task = self._task, None
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         if self._ws is not None and not self._ws.closed:
             await self._ws.close()
         if self._http is not None and not self._http.closed:
@@ -239,6 +241,8 @@ class LavalinkVoiceClient(discord.VoiceProtocol):
         self._playing = False
         self._paused = False
         self._after = None
+        self._encoded = None
+        self._stop_requested = False
         self._volume = 100
         self._destroyed = False
         self.position, self.ping, self.last_exception = 0, -1, None
@@ -259,8 +263,8 @@ class LavalinkVoiceClient(discord.VoiceProtocol):
     async def disconnect(self, *, force=False):
         try:
             await self.guild.change_voice_state(channel=None)
-        except Exception:
-            pass
+        except discord.HTTPException as error:
+            print(f"[lavalink] couldn't leave the Discord voice channel: {error}")
         await self._teardown()
 
     async def _teardown(self):
@@ -321,12 +325,14 @@ class LavalinkVoiceClient(discord.VoiceProtocol):
 
     async def play_track(self, track, volume_percent, after):
         self._after, self._playing, self._paused, self._volume = after, True, False, int(volume_percent)
+        self._encoded = track.encoded
         self.last_exception = None
         try:
             await self.node.update_player(self.guild.id, {"track": {"encoded": track.encoded}, "volume": self._volume,
                                                           "paused": False, "position": 0})
         except LavalinkError:
             self._playing = self._paused = False
+            self._encoded = None
             after_error = self._after
             self._after = None
             if after_error is not None:
@@ -342,8 +348,20 @@ class LavalinkVoiceClient(discord.VoiceProtocol):
         asyncio.create_task(guard())
 
     def stop(self):
-        self._fire(self.node.update_player(self.guild.id, {"track": {"encoded": None}}))
-        self._end_track("stopped")
+        if self._stop_requested:
+            return
+        self._stop_requested = True
+
+        async def stop_track():
+            try:
+                await self.node.update_player(self.guild.id, {"track": {"encoded": None}})
+            except LavalinkError as error:
+                print(f"[lavalink] couldn't stop track: {error}")
+            finally:
+                self._stop_requested = False
+                self._end_track("stopped")
+
+        asyncio.create_task(stop_track())
 
     def pause(self):
         self._paused = True
@@ -362,14 +380,20 @@ class LavalinkVoiceClient(discord.VoiceProtocol):
     def _end_track(self, reason):
         was = self._playing
         self._playing = self._paused = False
+        self._encoded = None
         after, self._after = self._after, None
         if was and after is not None:
             after(None if reason in ("finished", "stopped", "cleanup", "disconnected") else RuntimeError(reason))
 
     async def on_lavalink_event(self, msg):
+        event_track = msg.get("track") or {}
+        event_encoded = event_track.get("encoded")
+        if event_encoded and self._encoded and event_encoded != self._encoded:
+            return
+
         t = msg.get("type")
         if t == "TrackEndEvent":
-            if msg.get("reason") != "replaced":
+            if msg.get("reason") != "replaced" and not self._stop_requested:
                 self._end_track(msg.get("reason", "finished"))
         elif t == "TrackExceptionEvent":
             self.last_exception = (msg.get("exception") or {}).get("message", "unknown error")

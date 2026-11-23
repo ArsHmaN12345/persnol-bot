@@ -239,6 +239,7 @@ class GuildPlayer:
         self.panel = None
         self.has_tracks = asyncio.Event()
         self.next_event = asyncio.Event()
+        self.next_error = None
         self.task = asyncio.create_task(self.run())
 
     async def say(self, text):
@@ -409,6 +410,12 @@ class GuildPlayer:
                         await self.destroy()
                         return
 
+                from modules import lavalink
+
+                if lavalink.NODE is None or not lavalink.NODE.ready:
+                    await asyncio.sleep(5)
+                    continue
+
                 track = self.queue.popleft()
                 voice = self.guild.voice_client
                 if not voice or not voice.is_connected():
@@ -423,10 +430,12 @@ class GuildPlayer:
                 self.current = track
                 self.skipped = False
                 self.next_event.clear()
+                self.next_error = None
 
                 def after(error, event=self.next_event):
                     if error:
                         print(f"[music] playback ended with an error: {error}")
+                        self.next_error = error
                     loop.call_soon_threadsafe(event.set)
 
                 try:
@@ -435,6 +444,10 @@ class GuildPlayer:
                     await voice.play_track(track, int(self.volume * 100), after)
                 except BotError as error:
                     self.current = None
+                    if lavalink.NODE is None or not lavalink.NODE.ready:
+                        self.queue.appendleft(track)
+                        await asyncio.sleep(5)
+                        continue
                     await self.say(f"❌ Couldn't play **{safe(track.title)}**: {error}")
                     continue
                 except (discord.HTTPException, asyncio.TimeoutError) as error:
@@ -452,12 +465,22 @@ class GuildPlayer:
                     except asyncio.TimeoutError:
                         voice = self.guild.voice_client
                         if voice is None or not voice.is_connected():
-                            self.queue.clear()
+                            if str(self.guild.id) not in data["stay"]:
+                                self.queue.clear()
                             break
 
                 await self.end_panel()
                 self.current = None
-                if self.loop_mode == "track" and not self.skipped:
+                voice = self.guild.voice_client
+                if self.next_error and str(self.next_error) == "lavalink connection lost":
+                    self.queue.appendleft(track)
+                elif (
+                    not self.skipped
+                    and str(self.guild.id) in data["stay"]
+                    and (voice is None or not voice.is_connected())
+                ):
+                    self.queue.appendleft(track)
+                elif self.loop_mode == "track" and not self.skipped:
                     self.queue.appendleft(track)
                 elif self.loop_mode == "queue":
                     self.queue.append(track)
@@ -594,10 +617,11 @@ class Music(BaseCog):
             raise MusicError(f"I need View Channel and Connect permission for {channel.name}.")
         if not permissions.speak:
             raise MusicError(f"I need Speak permission in {channel.name}.")
-        if channel.user_limit and len(channel.members) >= channel.user_limit:
-            if not permissions.move_members:
-                raise MusicError(f"{channel.name} is full.")
         voice = guild.voice_client
+        already_connected = voice and voice.is_connected()
+        if (not already_connected or voice.channel.id != channel.id) and channel.user_limit:
+            if len(channel.members) >= channel.user_limit and not permissions.move_members:
+                raise MusicError(f"{channel.name} is full.")
         if voice:
             if voice.is_connected():
                 if voice.channel.id != channel.id:
