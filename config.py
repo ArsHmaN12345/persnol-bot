@@ -25,15 +25,15 @@ SET_PRESENCE = True         # show "Listening to <song>" on the bot's profile
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 
-# ---------- LAVALINK (optional, recommended for hosting) ----------
-# Lavalink is a separate audio server (see the lavalink/ folder). When it is connected the bot uses it for
-# music instead of ffmpeg + yt-dlp on the bot itself.
-MUSIC_BACKEND = os.getenv("MUSIC_BACKEND", "auto")      # auto = Lavalink if connected, else ffmpeg | lavalink | ffmpeg
-LAVALINK_HOST = os.getenv("LAVALINK_HOST", "")          # e.g. lavalink.railway.internal  (empty = don't use Lavalink)
-LAVALINK_PORT = int(os.getenv("LAVALINK_PORT", "2333"))
-LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD", "")
-LAVALINK_SECURE = os.getenv("LAVALINK_SECURE", "false").lower() in ("1", "true", "yes")   # https/wss (public nodes)
-LAVALINK_SEARCH = os.getenv("LAVALINK_SEARCH", "ytsearch")                                  # search sources (YouTube)
+# ---------- LAVALINK (Free Public Node: Zero setup needed!) ----------
+# Connects to an active public Lavalink v4 node to stream YouTube, Spotify, and web links
+# without needing yt-dlp, ffmpeg, or hosting a separate server.
+MUSIC_BACKEND = os.getenv("MUSIC_BACKEND", "auto")
+LAVALINK_HOST = os.getenv("LAVALINK_HOST", "lavalink.jirayu.net")
+LAVALINK_PORT = int(os.getenv("LAVALINK_PORT", "13592"))
+LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
+LAVALINK_SECURE = os.getenv("LAVALINK_SECURE", "false").lower() in ("1", "true", "yes")
+LAVALINK_SEARCH = os.getenv("LAVALINK_SEARCH", "ytsearch")
 
 # ---------- JOIN-TO-CREATE ----------
 JTC_ALLOW_EVERYONE = True   # True = any server member can make/use their own temp room
