@@ -87,16 +87,9 @@ async def handle_error(ctx, error):
         traceback.print_exception(type(err), err, err.__traceback__)
         text = "❌ Something went wrong."
     try:
-        # If already deferred (e.g. ctx.typing() / ctx.defer()), do not force ephemeral=True
-        # because Discord rejects changing an already-acknowledged interaction to ephemeral.
-        is_deferred = ctx.interaction is not None and ctx.interaction.response.is_done()
-        ephemeral = slash and not is_deferred
-        await ctx.send(embed=emb(text, RED), ephemeral=ephemeral, allowed_mentions=NO_PINGS)
+        await ctx.send(embed=emb(text, RED), ephemeral=slash, allowed_mentions=NO_PINGS)
     except discord.HTTPException:
-        try:
-            await ctx.send(embed=emb(text, RED), allowed_mentions=NO_PINGS)
-        except Exception:
-            pass
+        pass
 
 
 class BaseCog(commands.Cog):
