@@ -18,6 +18,6 @@ services:
       LAVALINK_PORT: 2333
       LAVALINK_PASSWORD: ${LAVALINK_SERVER_PASSWORD:-youshallnotpass}
       LAVALINK_SECURE: "false"
-      LAVALINK_SEARCH: ${LAVALINK_SEARCH:-ytsearch,scsearch}
+      LAVALINK_SEARCH: ${LAVALINK_SEARCH:-scsearch,ytsearch}
     volumes:
       - ./storage:/app/storage

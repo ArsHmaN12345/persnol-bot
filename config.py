@@ -31,7 +31,7 @@ LAVALINK_HOST = os.getenv("LAVALINK_HOST", "")
 LAVALINK_PORT = int(os.getenv("LAVALINK_PORT", "2333"))
 LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD", "")
 LAVALINK_SECURE = os.getenv("LAVALINK_SECURE", "false").strip().lower() in ("1", "true", "yes", "on")
-LAVALINK_SEARCH = os.getenv("LAVALINK_SEARCH", "ytsearch,scsearch")
+LAVALINK_SEARCH = os.getenv("LAVALINK_SEARCH", "scsearch,ytsearch")
 
 # ---------- JOIN-TO-CREATE ----------
 JTC_ALLOW_EVERYONE = True   # True = any server member can make/use their own temp room

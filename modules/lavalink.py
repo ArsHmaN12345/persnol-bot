@@ -43,6 +43,20 @@ def parse_track(t):
 class Node:
     def __init__(self, bot, host, port, password, secure=False):
         self.bot = bot
+        host = str(host).strip()
+        if "://" in host:
+            scheme, host = host.split("://", 1)
+            secure = scheme.lower() in ("https", "wss")
+        host = host.split("/", 1)[0]
+        if host.startswith("[") and "]" in host:
+            closing = host.find("]")
+            if len(host) > closing + 1 and host[closing + 1] == ":":
+                port = int(host[closing + 2:])
+                host = host[:closing + 1]
+        elif host.count(":") == 1:
+            possible_host, possible_port = host.rsplit(":", 1)
+            if possible_port.isdigit():
+                host, port = possible_host, int(possible_port)
         self.host, self.port, self.password = host, port, password
         http, ws = ("https", "wss") if secure else ("http", "ws")
         self.base = f"{http}://{host}:{port}"
@@ -171,6 +185,8 @@ class Node:
     async def resolve(self, identifier):
         """A URL or 'ytsearch:text' -> list of parsed tracks ([] if nothing was found)."""
         data = await self.request("GET", "/loadtracks", params={"identifier": identifier})
+        if not isinstance(data, dict):
+            raise LavalinkError("Lavalink returned an invalid track lookup response.")
         kind, d = data["loadType"], data.get("data")
         if kind == "track":
             return [parse_track(d)]
@@ -178,8 +194,14 @@ class Node:
             return [parse_track(t) for t in d["tracks"]]
         if kind == "search":
             return [parse_track(t) for t in d]
-        if kind == "error":
-            raise LavalinkError(str((d or {}).get("message") or "Lavalink couldn't load that."))
+        if kind in ("error", "loadFailed"):
+            if isinstance(d, dict):
+                detail = d.get("message") or d.get("severity") or d
+                if isinstance(detail, dict):
+                    detail = detail.get("message") or "Lavalink couldn't load that track."
+            else:
+                detail = d
+            raise LavalinkError(str(detail or "Lavalink couldn't load that track."))
         return []
 
     async def search(self, text, prefixes=None):

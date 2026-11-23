@@ -4,6 +4,33 @@ import unittest
 from modules import lavalink
 
 
+class LavalinkEndpointTests(unittest.TestCase):
+    def test_load_failed_detail_is_preserved(self):
+        node = lavalink.Node(None, "music.railway.app", 2333, "password")
+
+        async def fake_request(method, path, params=None, body=None, timeout=20):
+            return {
+                "loadType": "loadFailed",
+                "data": {"message": "YouTube source plugin is unavailable", "severity": "fault"},
+            }
+
+        node.request = fake_request
+        with self.assertRaisesRegex(lavalink.LavalinkError, "YouTube source plugin is unavailable"):
+            asyncio.run(node.resolve("ytsearch:test"))
+
+    def test_railway_public_host_with_port(self):
+        node = lavalink.Node(None, "music.railway.app:12345", 2333, "password")
+        self.assertEqual(node.host, "music.railway.app")
+        self.assertEqual(node.port, 12345)
+        self.assertEqual(node.base, "http://music.railway.app:12345")
+
+    def test_https_public_url(self):
+        node = lavalink.Node(None, "https://music.railway.app", 443, "password")
+        self.assertEqual(node.host, "music.railway.app")
+        self.assertEqual(node.port, 443)
+        self.assertTrue(node.base.startswith("https://"))
+
+
 class LavalinkVoiceClientTests(unittest.IsolatedAsyncioTestCase):
     def make_client(self):
         client = lavalink.LavalinkVoiceClient.__new__(lavalink.LavalinkVoiceClient)
