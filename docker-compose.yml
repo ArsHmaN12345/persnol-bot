@@ -1,0 +1,18 @@
+services:
+  lavalink:                       # the audio server (see lavalink/application.yml)
+    build: ./lavalink
+    restart: unless-stopped
+    environment:
+      LAVALINK_BIND_ADDRESS: 0.0.0.0
+      LAVALINK_SERVER_PASSWORD: ${LAVALINK_PASSWORD:?set LAVALINK_PASSWORD in .env}
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on: [lavalink]
+    environment:
+      DATA_FILE: /app/storage/data.json
+      LAVALINK_HOST: lavalink
+      LAVALINK_PORT: "2333"
+    volumes:
+      - ./storage:/app/storage
