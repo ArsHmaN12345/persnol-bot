@@ -226,8 +226,8 @@ async def resolve_track(track, node):
 
 # ============================================================ voice client
 class LavalinkVoiceClient(discord.VoiceProtocol):
-    """Used instead of discord.VoiceClient: channel.connect(cls=LavalinkVoiceClient)."""
-    source = None                        # music.py peeks at vc.source for the ffmpeg backend
+    """Discord voice-state adapter; Lavalink handles encrypted audio playback."""
+    source = None
 
     def __init__(self, client, channel):
         super().__init__(client, channel)
@@ -390,10 +390,12 @@ async def run_diag(bot):
 
     node = NODE
     mode = config.MUSIC_BACKEND
-    add("ℹ️", f"Backend setting: **{mode}**")
+    add("ℹ️", f"Music backend: Lavalink (required; setting is `{mode}`).")
+    if mode == "ffmpeg":
+        add("❌", "The FFmpeg music backend is no longer supported. Set `MUSIC_BACKEND=lavalink`.")
     lines.append("**Lavalink**")
     if node is None:
-        add("⚠️", "Not configured (set `LAVALINK_HOST`, `LAVALINK_PORT`, `LAVALINK_PASSWORD`).")
+        add("❌", "Not configured (set `LAVALINK_HOST`, `LAVALINK_PORT`, and `LAVALINK_PASSWORD`).")
     elif not node.ready:
         add("❌", f"Not connected to `{node.host}:{node.port}` - {node.last_error or 'connecting...'}")
     else:
@@ -413,21 +415,9 @@ async def run_diag(bot):
                     + (f" (e.g. {_one_line(found[0]['title'], 50)})" if found else " - that source is probably disabled or blocked"))
             except Exception as e:
                 add("❌", f"`{prefix}:` search failed - {_one_line(e)}")
-    lines.append("**FFmpeg audio engine**")
+    lines.append("**FFmpeg (AI voice messages only)**")
     ff = shutil.which("ffmpeg")
-    add("✅" if ff else "❌", "ffmpeg " + ("found" if ff else "NOT installed"))
-    lines.append("**Voice libraries**")
-    for mod, label in (("davey", "davey (Discord encrypted voice)"), ("nacl", "PyNaCl")):
-        try:
-            __import__(mod)
-            add("✅", label)
-        except Exception:
-            add("❌", f"{label} is missing: `pip install -U \"discord.py[voice]\"`")
-    try:
-        loaded = discord.opus.is_loaded() or bool(discord.opus._load_default())
-    except Exception:
-        loaded = False
-    add("✅" if loaded else "⚠️", "Opus library " + ("loaded" if loaded else "not loaded (needed for the built-in backend; Linux: install libopus0)"))
+    add("✅" if ff else "⚠️", "ffmpeg " + ("found" if ff else "not installed; AI voice-message commands need it"))
 
     text = "\n".join(lines)
     hints = []

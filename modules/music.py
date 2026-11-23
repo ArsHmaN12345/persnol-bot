@@ -1,104 +1,58 @@
-"""Music module – direct link and Lavalink playback engine.
-Plays audio links from anywhere using FFmpeg or Lavalink. No yt-dlp dependency.
-"""
+"""Lavalink-backed music playback, queue controls, and voice presence."""
 import asyncio
 import base64
 import collections
 import json
-import os
-import platform
 import random
 import re
-import shutil
-import subprocess
-import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
+from typing import Literal, Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-from typing import Literal, Optional
 
 import config
-from utils import data, save_data, need_guild, find_vc, has_access, is_owner, BotError
+from utils import data, save_data, need_guild, find_vc, has_access, BotError
 from ui import BaseCog
 
 GROUP = "music"
+BLURPLE, GREEN, YELLOW, RED = 0x5865F2, 0x57F287, 0xFEE75C, 0xED4245
+STAY_GRACE = 45
+STAY_INTERVAL = 15
+SPOTIFY_RE = re.compile(r"open\.spotify\.com/(?:intl-[a-z]+/)?(track|album|playlist)/([A-Za-z0-9]+)")
+_spotify = {"token": None, "expires": 0}
 
 
 class MusicError(BotError):
     pass
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Lavalink check (unchanged – the lavalink module handles itself)
-# ═══════════════════════════════════════════════════════════════
-def _lava():
-    """The Lavalink module when a node is connected and allowed, else None."""
-    if config.MUSIC_BACKEND == "ffmpeg":
-        return None
-    try:
-        from modules import lavalink as lv
-    except Exception:
-        return None
-    return lv if lv.NODE is not None and lv.NODE.ready else None
+def _lavalink():
+    from modules import lavalink
+
+    node = lavalink.NODE
+    if node is None:
+        raise MusicError("Music needs Lavalink. Configure LAVALINK_HOST, LAVALINK_PORT, and LAVALINK_PASSWORD.")
+    if not node.ready:
+        detail = f" ({node.last_error})" if node.last_error else ""
+        raise MusicError(f"Lavalink isn't connected yet{detail}. Check the Lavalink Railway service.")
+    return lavalink
 
 
-# ═══════════════════════════════════════════════════════════════
-#  FFmpeg options
-# ═══════════════════════════════════════════════════════════════
-_FFMPEG_OPTS = "-vn"                      # drop video, audio only
-_URL_TTL = 300                            # re-extract after 5 min (YT URLs expire ~6 h but play safe)
-STAY_GRACE = 45                           # 24/7 watchdog grace period
-STAY_INTERVAL = 15                        # watchdog check frequency
-
-
-def _ffmpeg_before(headers: dict | None = None) -> str:
-    """Build the FFmpeg before_options string.
-
-    -nostdin         → prevents FFmpeg from waiting for keyboard input on Windows
-    -reconnect ...   → auto-reconnects if the stream drops mid-song
-    -user_agent ...  → forwards yt-dlp's User-Agent so Google Video / servers don't return 403 Forbidden
-    """
-    base = "-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-    if not headers:
-        return base
-    ua = headers.get("User-Agent")
-    if ua:
-        ua_clean = ua.replace('"', '').replace("'", "")
-        base += f' -user_agent "{ua_clean}"'
-    referer = headers.get("Referer")
-    if referer:
-        ref_clean = referer.replace('"', '').replace("'", "")
-        base += f' -referer "{ref_clean}"'
-    return base
-
-
-def _find_ffmpeg() -> str | None:
-    """Return the ffmpeg executable path, or None."""
-    return shutil.which("ffmpeg")
-
-
-# ═══════════════════════════════════════════════════════════════
-#  Helpers
-# ═══════════════════════════════════════════════════════════════
-BLURPLE, GREEN, YELLOW, RED = 0x5865F2, 0x57F287, 0xFEE75C, 0xED4245
-
-
-def fmt(sec):
-    if not sec:
-        return "?"
-    sec = int(sec)
-    h, r = divmod(sec, 3600)
-    m, s = divmod(r, 60)
-    return f"{h}:{m:02}:{s:02}" if h else f"{m}:{s:02}"
+def fmt(seconds):
+    if seconds is None:
+        return "Live"
+    seconds = int(seconds)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours}:{minutes:02}:{seconds:02}" if hours else f"{minutes}:{seconds:02}"
 
 
 def safe(text):
-    return discord.utils.escape_markdown(text).replace("[", "(").replace("]", ")")
+    return discord.utils.escape_markdown(str(text)).replace("[", "(").replace("]", ")")
 
 
 def bar(volume, width=12):
@@ -110,203 +64,168 @@ def info_embed(text, color=BLURPLE):
     return discord.Embed(description=text, color=color)
 
 
-def volume_embed(p):
-    pct = int(p.volume * 100)
-    icon = "🔇" if pct == 0 else "🔉" if pct < 50 else "🔊"
-    e = discord.Embed(title=f"{icon} Volume", description=f"`{bar(p.volume)}`  **{pct}%**", color=BLURPLE)
-    e.set_footer(text="0% – 200%  •  100% is the original loudness")
-    return e
+class Track:
+    __slots__ = ("title", "requester", "encoded", "page", "thumb", "duration", "query")
+
+    def __init__(self, title, requester, *, encoded=None, page=None, thumb=None, duration=None, query=None):
+        self.title = title or "Unknown"
+        self.requester = requester
+        self.encoded = encoded
+        self.page = page
+        self.thumb = thumb
+        self.duration = duration
+        self.query = query
 
 
-def queue_embed(p):
-    return discord.Embed(title="📜 Queue", description=p.queue_text(), color=BLURPLE)
-
-
-def np_embed(p, track):
-    title = safe(track.title)
-    desc = f"**[{title}]({track.page})**" if track.page else f"**{title}**"
-    paused = bool(p.guild.voice_client and p.guild.voice_client.is_paused())
-    e = discord.Embed(title="⏸️ Paused" if paused else "🎶 Now Playing", description=desc,
-                      color=YELLOW if paused else BLURPLE)
-    if track.thumb:
-        e.set_thumbnail(url=track.thumb)
-    e.add_field(name="Duration", value=fmt(track.duration), inline=True)
-    e.add_field(name="Requested by", value=safe(str(track.requester)), inline=True)
-    e.add_field(name="In queue", value=str(len(p.queue)), inline=True)
-    e.add_field(name="Volume", value=f"`{bar(p.volume)}`  **{int(p.volume * 100)}%**", inline=False)
-    loop_icon = {"off": "off", "track": "🔂 track", "queue": "🔁 queue"}[p.loop_mode]
-    e.set_footer(text=f"Loop: {loop_icon}  •  Opus {p.kbps} kbps")
-    return e
-
-
-# ═══════════════════════════════════════════════════════════════
-#  Spotify
-# ═══════════════════════════════════════════════════════════════
-_sp = {"token": None, "exp": 0}
-SPOTIFY_RE = re.compile(r"open\.spotify\.com/(?:intl-[a-z]+/)?(track|album|playlist)/([A-Za-z0-9]+)")
+def track_from_lavalink(item, requester):
+    return Track(
+        item.get("title"),
+        requester,
+        encoded=item.get("encoded"),
+        page=item.get("uri"),
+        thumb=item.get("thumb"),
+        duration=item.get("length"),
+    )
 
 
 def _spotify_token():
-    if _sp["token"] and time.time() < _sp["exp"] - 30:
-        return _sp["token"]
+    if _spotify["token"] and time.time() < _spotify["expires"] - 30:
+        return _spotify["token"]
     if not (config.SPOTIFY_CLIENT_ID and config.SPOTIFY_CLIENT_SECRET):
-        raise MusicError("Spotify links need SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in config.py.")
-    auth = base64.b64encode(f"{config.SPOTIFY_CLIENT_ID}:{config.SPOTIFY_CLIENT_SECRET}".encode()).decode()
-    req = urllib.request.Request(
+        raise MusicError("Spotify links need SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET.")
+    auth = base64.b64encode(
+        f"{config.SPOTIFY_CLIENT_ID}:{config.SPOTIFY_CLIENT_SECRET}".encode()
+    ).decode()
+    request = urllib.request.Request(
         "https://accounts.spotify.com/api/token",
         data=b"grant_type=client_credentials",
         headers={"Authorization": f"Basic {auth}", "Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            j = json.load(r)
-    except urllib.error.HTTPError:
-        raise MusicError("Spotify rejected your client ID/secret. Check them in config.py.")
-    _sp["token"], _sp["exp"] = j["access_token"], time.time() + j.get("expires_in", 3600)
-    return _sp["token"]
+        with urllib.request.urlopen(request, timeout=15) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as error:
+        raise MusicError(f"Spotify rejected its credentials (HTTP {error.code}).")
+    except urllib.error.URLError:
+        raise MusicError("Couldn't reach Spotify. Try again shortly.")
+    _spotify["token"] = result["access_token"]
+    _spotify["expires"] = time.time() + result.get("expires_in", 3600)
+    return _spotify["token"]
 
 
 def _spotify_get(url):
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {_spotify_token()}"})
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {_spotify_token()}"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            raise MusicError("Spotify refused this request (403). Try a track/album link instead.")
-        raise MusicError(f"Spotify error {e.code}.")
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise MusicError("Spotify refused the request. Check the Spotify API credentials.")
+        raise MusicError(f"Spotify returned HTTP {error.code}.")
+    except urllib.error.URLError:
+        raise MusicError("Couldn't reach Spotify. Try again shortly.")
 
 
-def spotify_tracks(kind, ident):
-    out = []
+def spotify_tracks(kind, identifier):
+    tracks = []
     if kind == "track":
-        t = _spotify_get(f"https://api.spotify.com/v1/tracks/{ident}")
-        out.append((t["name"], t["artists"][0]["name"]))
+        item = _spotify_get(f"https://api.spotify.com/v1/tracks/{identifier}")
+        tracks.append((item["name"], item["artists"][0]["name"]))
     elif kind == "album":
-        alb = _spotify_get(f"https://api.spotify.com/v1/albums/{ident}")
-        page = alb["tracks"]
+        page = _spotify_get(f"https://api.spotify.com/v1/albums/{identifier}/tracks?limit=50")
         while page:
-            for t in page["items"]:
-                out.append((t["name"], t["artists"][0]["name"]))
-            page = _spotify_get(page["next"]) if page.get("next") and len(out) < config.MAX_QUEUE else None
-    else:  # playlist
-        page = _spotify_get(f"https://api.spotify.com/v1/playlists/{ident}/items?limit=100")
+            tracks.extend((item["name"], item["artists"][0]["name"]) for item in page["items"])
+            page = _spotify_get(page["next"]) if page.get("next") and len(tracks) < config.MAX_QUEUE else None
+    else:
+        page = _spotify_get(f"https://api.spotify.com/v1/playlists/{identifier}/items?limit=100")
         while page:
-            for it in page["items"]:
-                t = it.get("item") or it.get("track")
-                if t and t.get("type", "track") == "track" and t.get("artists"):
-                    out.append((t["name"], t["artists"][0]["name"]))
-            page = _spotify_get(page["next"]) if page.get("next") and len(out) < config.MAX_QUEUE else None
-    if not out:
-        raise MusicError("Couldn't read any tracks from that Spotify link.")
-    return out[:config.MAX_QUEUE]
-
-
-# ═══════════════════════════════════════════════════════════════
-#  Track
-# ═══════════════════════════════════════════════════════════════
-class Track:
-    __slots__ = ("title", "thumb", "query", "requester", "stream_url", "duration",
-                 "page", "headers", "resolved_at", "encoded")
-
-    def __init__(self, title, query, requester, *, stream_url=None, duration=None,
-                 page=None, thumb=None, headers=None):
-        self.title = title
-        self.thumb = thumb
-        self.query = query
-        self.requester = requester
-        self.stream_url = stream_url
-        self.duration = duration
-        self.page = page
-        self.headers = headers or {}                 # ← NEW: http_headers from yt-dlp
-        self.resolved_at = time.time() if stream_url else 0
-        self.encoded = None                          # Lavalink track id
-
-    @classmethod
-    def from_info(cls, info, requester):
-        """Build a Track from a yt-dlp info dict (single video, not a playlist)."""
-        page = info.get("webpage_url") or info.get("original_url")
-        return cls(
-            info.get("title") or "Unknown",
-            page or info.get("url"),
-            requester,
-            stream_url=info.get("url"),
-            duration=info.get("duration"),
-            page=page,
-            thumb=info.get("thumbnail"),
-            headers=info.get("http_headers") or {},  # ← CRITICAL: capture the headers
-        )
-
-    async def ensure_stream(self):
-        """Ensure stream URL is available."""
-        if self.stream_url:
-            return
-        if not self.stream_url:
-            self.stream_url = self.query
-
-
-def track_from_lava(t, requester):
-    tr = Track(t["title"], t["uri"] or t["title"], requester, duration=t["length"], page=t["uri"], thumb=t["thumb"])
-    tr.encoded = t["encoded"]
-    return tr
-
-
-# ═══════════════════════════════════════════════════════════════
-#  expand()  –  turn a link or search text into a list of Tracks
-# ═══════════════════════════════════════════════════════════════
-async def expand_lavalink(lv, query, requester):
-    """Lavalink resolver for links and search queries (no yt-dlp needed)."""
-    loop = asyncio.get_running_loop()
-    node = lv.NODE
-    m = SPOTIFY_RE.search(query)
-    if m:
-        pairs = await loop.run_in_executor(None, spotify_tracks, *m.groups())
-        return [Track(f"{a} - {t}", f"{a} - {t}", requester) for t, a in pairs]
-    is_url = query.startswith(("http://", "https://"))
-    try:
-        found = await node.resolve(query) if is_url else await node.search(query)
-    except lv.LavalinkError as e:
-        raise MusicError(str(e))
-    if not found:
-        raise MusicError("No results found.")
-    if not is_url:
-        found = found[:1]
-    return [track_from_lava(t, requester) for t in found[:config.MAX_QUEUE]]
+            for entry in page["items"]:
+                item = entry.get("item") or entry.get("track")
+                if item and item.get("type", "track") == "track" and item.get("artists"):
+                    tracks.append((item["name"], item["artists"][0]["name"]))
+            page = _spotify_get(page["next"]) if page.get("next") and len(tracks) < config.MAX_QUEUE else None
+    if not tracks:
+        raise MusicError("Couldn't find any tracks in that Spotify link.")
+    return tracks[:config.MAX_QUEUE]
 
 
 async def expand(query, requester):
-    """Play directly from links or through Lavalink (zero yt-dlp dependency)."""
-    loop = asyncio.get_running_loop()
+    """Resolve a song search, supported link, or Spotify playlist through Lavalink."""
     query = query.strip()
-    lv = _lava()
-    if lv is not None:
-        return await expand_lavalink(lv, query, requester)
+    if not query:
+        raise MusicError("Enter a song name or a supported music link.")
 
-    # 1. Spotify links
-    m = SPOTIFY_RE.search(query)
-    if m:
-        raise MusicError("Spotify links require the Lavalink backend. Enable Lavalink on Railway or paste a direct audio link.")
+    lv = _lavalink()
+    match = SPOTIFY_RE.search(query)
+    if match:
+        loop = asyncio.get_running_loop()
+        pairs = await loop.run_in_executor(None, spotify_tracks, *match.groups())
+        semaphore = asyncio.Semaphore(5)
 
-    # 2. Direct audio / stream URLs from anywhere
+        async def resolve_spotify(title, artist):
+            async with semaphore:
+                results = await lv.NODE.search(f"{title} {artist}")
+            return track_from_lavalink(results[0], requester) if results else None
+
+        resolved = await asyncio.gather(
+            *(resolve_spotify(title, artist) for title, artist in pairs),
+            return_exceptions=True,
+        )
+        tracks = [item for item in resolved if isinstance(item, Track)]
+        if not tracks:
+            error = next((item for item in resolved if isinstance(item, Exception)), None)
+            if error:
+                raise MusicError(str(error))
+            raise MusicError("Lavalink couldn't find playable matches for that Spotify link.")
+        return tracks[:config.MAX_QUEUE]
+
     if query.startswith(("http://", "https://")):
-        # If it's YouTube without Lavalink
-        if "youtube.com" in query or "youtu.be" in query:
-            raise MusicError("YouTube links on cloud servers require Lavalink (see /status) to prevent 403 blocks. Connect Lavalink or paste a direct audio/stream link.")
-
-        # Clean title derived from the URL filename
-        parsed = urllib.parse.urlparse(query)
-        filename = parsed.path.split("/")[-1] if "/" in parsed.path else "Audio Stream"
-        filename = urllib.parse.unquote(filename).split("?")[0]
-        title = filename if len(filename) > 2 else "Direct Audio Link"
-        return [Track(title, query, requester, stream_url=query, page=query)]
-
-    # 3. Plain text search without Lavalink
-    raise MusicError("Please paste a direct audio link (e.g. .mp3, .m4a, .wav, web stream) or connect Lavalink to search by name.")
+        results = await lv.NODE.resolve(query)
+    else:
+        results = await lv.NODE.search(query)
+        results = results[:1]
+    if not results:
+        raise MusicError("No playable results found. Try another search or link.")
+    return [track_from_lavalink(item, requester) for item in results[:config.MAX_QUEUE]]
 
 
-# ═══════════════════════════════════════════════════════════════
-#  GuildPlayer  –  the per-server playback engine
-# ═══════════════════════════════════════════════════════════════
+def volume_embed(player):
+    percent = int(player.volume * 100)
+    icon = "🔇" if percent == 0 else "🔉" if percent < 50 else "🔊"
+    embed = discord.Embed(
+        title=f"{icon} Volume",
+        description=f"`{bar(player.volume)}`  **{percent}%**",
+        color=BLURPLE,
+    )
+    embed.set_footer(text="0%–200% • 100% is original loudness")
+    return embed
+
+
+def queue_embed(player):
+    return discord.Embed(title="📜 Queue", description=player.queue_text(), color=BLURPLE)
+
+
+def np_embed(player, track):
+    title = safe(track.title)
+    description = f"**[{title}]({track.page})**" if track.page else f"**{title}**"
+    voice = player.guild.voice_client
+    paused = bool(voice and voice.is_paused())
+    embed = discord.Embed(
+        title="⏸️ Paused" if paused else "🎶 Now Playing",
+        description=description,
+        color=YELLOW if paused else BLURPLE,
+    )
+    if track.thumb:
+        embed.set_thumbnail(url=track.thumb)
+    embed.add_field(name="Duration", value=fmt(track.duration), inline=True)
+    embed.add_field(name="Requested by", value=safe(track.requester), inline=True)
+    embed.add_field(name="In queue", value=str(len(player.queue)), inline=True)
+    embed.add_field(name="Volume", value=f"`{bar(player.volume)}`  **{int(player.volume * 100)}%**")
+    loop = {"off": "off", "track": "🔂 track", "queue": "🔁 queue"}[player.loop_mode]
+    embed.set_footer(text=f"Loop: {loop} • Lavalink")
+    return embed
+
+
 class GuildPlayer:
     def __init__(self, cog, guild):
         self.cog = cog
@@ -314,12 +233,10 @@ class GuildPlayer:
         self.queue = collections.deque()
         self.current = None
         self.volume = config.DEFAULT_VOLUME
-        self.loop_mode = "off"          # off | track | queue
+        self.loop_mode = "off"
         self.skipped = False
         self.text_channel = None
-        self._status_off = False
         self.panel = None
-        self.kbps = config.AUDIO_BITRATE
         self.has_tracks = asyncio.Event()
         self.next_event = asyncio.Event()
         self.task = asyncio.create_task(self.run())
@@ -329,365 +246,374 @@ class GuildPlayer:
         if self.text_channel:
             try:
                 await self.text_channel.send(text)
-            except discord.HTTPException:
-                pass
+            except discord.HTTPException as error:
+                print(f"[music] couldn't send message: {error}")
 
     async def set_status(self, text):
-        if not config.VC_STATUS or self._status_off:
+        if not config.VC_STATUS:
             return
-        vc = self.guild.voice_client
-        if not vc or not vc.channel:
+        voice = self.guild.voice_client
+        if not voice or not voice.channel:
             return
-        if text:
-            text = text[:120]
         try:
-            await vc.channel.edit(status=text)
+            await voice.channel.edit(status=text[:120] if text else None)
         except discord.Forbidden:
-            self._status_off = True
-            print("[music] No permission to set the voice channel status. "
-                  "Give the bot 'Set Voice Channel Status' (or Manage Channels).")
-        except Exception:
-            pass
-
-    async def announce(self, track):
-        print(f"[music] ▶ Now playing: {track.title} [{fmt(track.duration)}] ({self.kbps}kbps Opus) - {track.requester}")
-        await self.end_panel()
-        await self.set_presence(track.title)
-        if self.text_channel:
-            try:
-                self.panel = await self.text_channel.send(embed=np_embed(self, track), view=PlayerView(self))
-            except discord.HTTPException:
-                self.panel = None
+            print("[music] Can't set voice-channel status; grant Set Voice Channel Status permission.")
+        except discord.HTTPException as error:
+            print(f"[music] couldn't update voice-channel status: {error}")
 
     async def set_presence(self, title):
         if not config.SET_PRESENCE:
             return
         try:
-            pres = self.cog.bot.get_cog("Presence")
-            if pres is not None:
-                await pres.music_update(self.guild.id, title)
-                return
-            activity = discord.Activity(type=discord.ActivityType.listening, name=title[:100]) if title else None
-            await self.cog.bot.change_presence(activity=activity)
-        except Exception:
-            pass
+            presence = self.cog.bot.get_cog("Presence")
+            if presence:
+                await presence.music_update(self.guild.id, title)
+            else:
+                activity = discord.Activity(type=discord.ActivityType.listening, name=title[:100]) if title else None
+                await self.cog.bot.change_presence(activity=activity)
+        except (discord.HTTPException, AttributeError) as error:
+            print(f"[music] couldn't update bot presence: {error}")
 
     async def end_panel(self):
         if self.panel:
             try:
                 await self.panel.edit(view=None)
-            except discord.HTTPException:
-                pass
+            except discord.HTTPException as error:
+                print(f"[music] couldn't close player controls: {error}")
             self.panel = None
 
-    def toggle_pause(self):
-        vc = self._vc()
-        if vc.is_paused():
-            vc.resume()
-        elif vc.is_playing():
-            vc.pause()
-        else:
-            raise MusicError("Nothing is playing.")
-
-    def bump_volume(self, delta):
-        self.set_volume(max(0, min(200, round(self.volume * 100) + delta)))
-
-    def cycle_loop(self):
-        modes = ["off", "track", "queue"]
-        self.loop_mode = modes[(modes.index(self.loop_mode) + 1) % 3]
+    async def announce(self, track):
+        print(f"[music] now playing: {track.title} [{fmt(track.duration)}] - {track.requester}")
+        await self.end_panel()
+        await self.set_presence(track.title)
+        if self.text_channel:
+            try:
+                self.panel = await self.text_channel.send(embed=np_embed(self, track), view=PlayerView(self))
+            except discord.HTTPException as error:
+                self.panel = None
+                print(f"[music] couldn't post player controls: {error}")
 
     def add(self, tracks):
         room = max(config.MAX_QUEUE - len(self.queue), 0)
-        tracks = tracks[:room]
-        self.queue.extend(tracks)
-        if tracks:
+        accepted = tracks[:room]
+        self.queue.extend(accepted)
+        if accepted:
             self.has_tracks.set()
-        return len(tracks)
+        return len(accepted)
 
-    # ---- the main playback loop ----
-    async def run(self):
-        loop = asyncio.get_running_loop()
-        try:
-            while True:
-                # ── wait for tracks ──
-                if not self.queue:
-                    await self.set_status(None)
-                    await self.set_presence(None)
-                while not self.queue:
-                    self.has_tracks.clear()
-                    try:
-                        await asyncio.wait_for(self.has_tracks.wait(), config.IDLE_TIMEOUT)
-                    except asyncio.TimeoutError:
-                        if str(self.guild.id) in data["stay"]:
-                            continue                      # 24/7 mode: never leave
-                        await self.say("💤 Idle for a while, leaving the voice channel.")
-                        await self.destroy()
-                        return
-
-                track = self.queue.popleft()
-                vc = self.guild.voice_client
-                if vc is None or not vc.is_connected():
-                    self.queue.clear()
-                    continue
-
-                lava = hasattr(vc, "play_track")          # Lavalink voice client?
-
-                # ── resolve the stream URL ──
-                try:
-                    if lava:
-                        from modules import lavalink as lv
-                        await lv.resolve_track(track, vc.node)
-                    else:
-                        await track.ensure_stream()
-                except BotError as e:
-                    await self.say(f"❌ Skipping **{track.title}**: {e}")
-                    continue
-
-                self.current = track
-                self.skipped = False
-                self.next_event.clear()
-                kbps = max(16, min(config.AUDIO_BITRATE, vc.channel.bitrate // 1000))
-                self.kbps = kbps
-                self.proc = None
-
-                def after(err, ev=self.next_event):
-                    if self.proc:
-                        try:
-                            self.proc.kill()
-                        except Exception:
-                            pass
-                        self.proc = None
-                    if err:
-                        print(f"[music] ⚠ playback error: {err}")
-                    loop.call_soon_threadsafe(ev.set)
-
-                # ── start playback ──
-                try:
-                    if lava:
-                        await vc.play_track(track, int(self.volume * 100), after)
-                    else:
-                        before = _ffmpeg_before(track.headers)
-                        raw = discord.FFmpegPCMAudio(track.stream_url, before_options=before, options=_FFMPEG_OPTS)
-                        source = discord.PCMVolumeTransformer(raw, volume=self.volume)
-                        print(f"[music] Playing direct stream: {track.stream_url[:80]}...")
-                        vc.play(source, after=after)
-                except Exception as e:
-                    await self.say(f"❌ Playback failed: {e}")
-                    print(f"[music] ⚠ play() exception: {type(e).__name__}: {e}")
-                    self.current = None
-                    continue
-
-                await self.set_status(config.VC_STATUS_TEMPLATE.format(title=track.title))
-                await self.announce(track)
-
-                # ── wait for the song to finish ──
-                while True:
-                    try:
-                        await asyncio.wait_for(self.next_event.wait(), 5)
-                        break
-                    except asyncio.TimeoutError:
-                        v = self.guild.voice_client
-                        if v is None or not v.is_connected():
-                            self.queue.clear()
-                            break
-
-                await self.end_panel()
-                self.current = None
-
-                # ── looping ──
-                if self.loop_mode == "track" and not self.skipped:
-                    self.queue.appendleft(track)
-                elif self.loop_mode == "queue":
-                    self.queue.append(track)
-        except asyncio.CancelledError:
-            pass
-
-    # ── controls ──
     def _vc(self):
-        vc = self.guild.voice_client
-        if not vc or not vc.is_connected():
-            raise MusicError("I'm not in a voice channel.")
-        return vc
+        voice = self.guild.voice_client
+        if not voice or not voice.is_connected():
+            raise MusicError("I'm not connected to a voice channel.")
+        return voice
 
     def skip(self):
-        vc = self._vc()
-        if not (vc.is_playing() or vc.is_paused()):
+        voice = self._vc()
+        if not (voice.is_playing() or voice.is_paused()):
             raise MusicError("Nothing is playing.")
         self.skipped = True
-        vc.stop()
+        voice.stop()
 
     def pause(self):
-        vc = self._vc()
-        if not vc.is_playing():
+        voice = self._vc()
+        if not voice.is_playing():
             raise MusicError("Nothing is playing.")
-        vc.pause()
+        voice.pause()
 
     def resume(self):
-        vc = self._vc()
-        if not vc.is_paused():
+        voice = self._vc()
+        if not voice.is_paused():
             raise MusicError("Nothing is paused.")
-        vc.resume()
+        voice.resume()
+
+    def toggle_pause(self):
+        voice = self._vc()
+        if voice.is_paused():
+            voice.resume()
+        elif voice.is_playing():
+            voice.pause()
+        else:
+            raise MusicError("Nothing is playing.")
 
     def stop(self):
         self.queue.clear()
         self.loop_mode = "off"
         self.skipped = True
-        vc = self.guild.voice_client
-        if vc and (vc.is_playing() or vc.is_paused()):
-            vc.stop()
+        voice = self.guild.voice_client
+        if voice and (voice.is_playing() or voice.is_paused()):
+            voice.stop()
 
     def set_volume(self, percent):
         if not 0 <= percent <= 200:
-            raise MusicError("Volume must be 0-200.")
+            raise MusicError("Volume must be between 0 and 200.")
         self.volume = percent / 100
-        vc = self.guild.voice_client
-        if vc is not None and hasattr(vc, "set_volume_percent"):          # Lavalink
-            vc.set_volume_percent(percent)
-        elif vc and isinstance(vc.source, discord.PCMVolumeTransformer):
-            vc.source.volume = self.volume
+        voice = self.guild.voice_client
+        if voice and hasattr(voice, "set_volume_percent"):
+            voice.set_volume_percent(percent)
+
+    def bump_volume(self, delta):
+        self.set_volume(max(0, min(200, round(self.volume * 100) + delta)))
 
     def set_loop(self, mode):
         if mode not in ("off", "track", "queue"):
-            raise MusicError("Loop mode: off, track or queue.")
+            raise MusicError("Loop mode must be off, track, or queue.")
         self.loop_mode = mode
 
-    def shuffle(self):
-        items = list(self.queue)
-        random.shuffle(items)
-        self.queue = collections.deque(items)
+    def cycle_loop(self):
+        modes = ("off", "track", "queue")
+        self.loop_mode = modes[(modes.index(self.loop_mode) + 1) % len(modes)]
 
-    def remove(self, index):
-        if not 1 <= index <= len(self.queue):
-            raise MusicError("No track at that position.")
-        t = self.queue[index - 1]
-        del self.queue[index - 1]
-        return t
+    def shuffle(self):
+        tracks = list(self.queue)
+        random.shuffle(tracks)
+        self.queue = collections.deque(tracks)
+
+    def remove(self, position):
+        if not 1 <= position <= len(self.queue):
+            raise MusicError("There is no queued track at that position.")
+        track = self.queue[position - 1]
+        del self.queue[position - 1]
+        return track
 
     def queue_text(self):
         lines = []
         if self.current:
-            lines.append(f"▶️ **{self.current.title}** `[{fmt(self.current.duration)}]`")
-        for i, t in enumerate(list(self.queue)[:10], 1):
-            lines.append(f"`{i}.` {t.title}")
+            lines.append(f"▶️ **{safe(self.current.title)}** `[{fmt(self.current.duration)}]`")
+        lines.extend(
+            f"`{index}.` {safe(track.title)}"
+            for index, track in enumerate(list(self.queue)[:10], 1)
+        )
         if len(self.queue) > 10:
             lines.append(f"...and {len(self.queue) - 10} more")
         lines.append(f"Loop: **{self.loop_mode}** | Volume: **{int(self.volume * 100)}%**")
-        return "\n".join(lines) if (self.current or self.queue) else "The queue is empty."
+        return "\n".join(lines) if self.current or self.queue else "The queue is empty."
+
+    async def run(self):
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                if not self.queue:
+                    await self.set_status(None)
+                    await self.set_presence(None)
+                while not self.queue:
+                    self.has_tracks.clear()
+                    if self.queue:
+                        break
+                    try:
+                        await asyncio.wait_for(self.has_tracks.wait(), config.IDLE_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        if str(self.guild.id) in data["stay"]:
+                            continue
+                        await self.say("💤 Idle for a while; leaving the voice channel.")
+                        await self.destroy()
+                        return
+
+                track = self.queue.popleft()
+                voice = self.guild.voice_client
+                if not voice or not voice.is_connected():
+                    if str(self.guild.id) not in data["stay"]:
+                        await self.say("❌ Disconnected from voice; stopping the music queue.")
+                        await self.destroy()
+                        return
+                    self.queue.appendleft(track)
+                    await asyncio.sleep(5)
+                    continue
+
+                self.current = track
+                self.skipped = False
+                self.next_event.clear()
+
+                def after(error, event=self.next_event):
+                    if error:
+                        print(f"[music] playback ended with an error: {error}")
+                    loop.call_soon_threadsafe(event.set)
+
+                try:
+                    lv = _lavalink()
+                    await lv.resolve_track(track, voice.node)
+                    await voice.play_track(track, int(self.volume * 100), after)
+                except BotError as error:
+                    self.current = None
+                    await self.say(f"❌ Couldn't play **{safe(track.title)}**: {error}")
+                    continue
+                except (discord.HTTPException, asyncio.TimeoutError) as error:
+                    self.current = None
+                    await self.say(f"❌ Playback failed for **{safe(track.title)}**.")
+                    print(f"[music] playback request failed: {type(error).__name__}: {error}")
+                    continue
+
+                await self.set_status(config.VC_STATUS_TEMPLATE.format(title=track.title))
+                await self.announce(track)
+                while True:
+                    try:
+                        await asyncio.wait_for(self.next_event.wait(), 5)
+                        break
+                    except asyncio.TimeoutError:
+                        voice = self.guild.voice_client
+                        if voice is None or not voice.is_connected():
+                            self.queue.clear()
+                            break
+
+                await self.end_panel()
+                self.current = None
+                if self.loop_mode == "track" and not self.skipped:
+                    self.queue.appendleft(track)
+                elif self.loop_mode == "queue":
+                    self.queue.append(track)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"[music] player crashed in {self.guild.id}: {type(error).__name__}: {error}")
+            await self.say("❌ The music player stopped unexpectedly. Check the bot logs.")
+            await self.destroy()
 
     async def destroy(self):
         self.queue.clear()
-        if hasattr(self, "proc") and self.proc:
-            try:
-                self.proc.kill()
-            except Exception:
-                pass
-            self.proc = None
+        self.has_tracks.set()
         await self.end_panel()
         await self.set_status(None)
         await self.set_presence(None)
         self.cog.players.pop(self.guild.id, None)
-        vc = self.guild.voice_client
-        if vc:
-            await vc.disconnect()
+        voice = self.guild.voice_client
+        if voice:
+            try:
+                await voice.disconnect()
+            except (discord.HTTPException, asyncio.TimeoutError) as error:
+                print(f"[music] couldn't disconnect from voice: {error}")
         if asyncio.current_task() is not self.task:
             self.task.cancel()
 
 
-# ═══════════════════════════════════════════════════════════════
-#  PlayerView  –  buttons under the Now Playing embed
-# ═══════════════════════════════════════════════════════════════
 class PlayerView(discord.ui.View):
     def __init__(self, player):
         super().__init__(timeout=None)
-        self.p = player
+        self.player = player
 
     async def interaction_check(self, interaction):
         if not has_access(interaction.user.id):
             await interaction.response.send_message(
-                embed=info_embed("🔒 Only the owner and trusted users can use these controls.", RED), ephemeral=True)
+                embed=info_embed("🔒 Only the owner and trusted users can use these controls.", RED),
+                ephemeral=True,
+            )
             return False
-        vc = self.p.guild.voice_client
-        voice = getattr(interaction.user, "voice", None)
-        if not vc or not voice or voice.channel != vc.channel:
+        voice = self.player.guild.voice_client
+        member_voice = getattr(interaction.user, "voice", None)
+        if not voice or not member_voice or member_voice.channel != voice.channel:
             await interaction.response.send_message(
-                embed=info_embed("Join my voice channel to use the controls.", YELLOW), ephemeral=True)
+                embed=info_embed("Join my voice channel to use the controls.", YELLOW),
+                ephemeral=True,
+            )
             return False
         return True
 
-    async def _do(self, interaction, fn, refresh=True):
+    async def _do(self, interaction, action, refresh=True):
         try:
-            fn()
-        except MusicError as e:
-            return await interaction.response.send_message(embed=info_embed(str(e), RED), ephemeral=True)
-        if refresh and self.p.current:
-            await interaction.response.edit_message(embed=np_embed(self.p, self.p.current), view=self)
+            action()
+        except MusicError as error:
+            await interaction.response.send_message(embed=info_embed(str(error), RED), ephemeral=True)
+            return
+        if refresh and self.player.current:
+            await interaction.response.edit_message(
+                embed=np_embed(self.player, self.player.current),
+                view=self,
+            )
         else:
             await interaction.response.defer()
 
     @discord.ui.button(emoji="🔉", style=discord.ButtonStyle.secondary, row=0)
-    async def vol_down(self, interaction, button):
-        await self._do(interaction, lambda: self.p.bump_volume(-10))
+    async def volume_down(self, interaction, button):
+        await self._do(interaction, lambda: self.player.bump_volume(-10))
 
     @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.primary, row=0)
-    async def pause_btn(self, interaction, button):
-        await self._do(interaction, self.p.toggle_pause)
+    async def pause_button(self, interaction, button):
+        await self._do(interaction, self.player.toggle_pause)
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
-    async def skip_btn(self, interaction, button):
-        await self._do(interaction, self.p.skip, refresh=False)
+    async def skip_button(self, interaction, button):
+        await self._do(interaction, self.player.skip, refresh=False)
 
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
-    async def stop_btn(self, interaction, button):
-        await self._do(interaction, self.p.stop, refresh=False)
+    async def stop_button(self, interaction, button):
+        await self._do(interaction, self.player.stop, refresh=False)
 
     @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=0)
-    async def vol_up(self, interaction, button):
-        await self._do(interaction, lambda: self.p.bump_volume(10))
+    async def volume_up(self, interaction, button):
+        await self._do(interaction, lambda: self.player.bump_volume(10))
 
     @discord.ui.button(emoji="🔁", label="Loop", style=discord.ButtonStyle.secondary, row=1)
-    async def loop_btn(self, interaction, button):
-        await self._do(interaction, self.p.cycle_loop)
+    async def loop_button(self, interaction, button):
+        await self._do(interaction, self.player.cycle_loop)
 
     @discord.ui.button(emoji="🔀", label="Shuffle", style=discord.ButtonStyle.secondary, row=1)
-    async def shuffle_btn(self, interaction, button):
-        await self._do(interaction, self.p.shuffle)
+    async def shuffle_button(self, interaction, button):
+        await self._do(interaction, self.player.shuffle)
 
     @discord.ui.button(emoji="📜", label="Queue", style=discord.ButtonStyle.secondary, row=1)
-    async def queue_btn(self, interaction, button):
-        await interaction.response.send_message(embed=queue_embed(self.p), ephemeral=True)
+    async def queue_button(self, interaction, button):
+        await interaction.response.send_message(embed=queue_embed(self.player), ephemeral=True)
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Music cog  –  Discord slash/text commands
-# ═══════════════════════════════════════════════════════════════
 class Music(BaseCog):
     def __init__(self, bot):
         self.bot = bot
         self.players = {}
 
-    async def cog_unload(self):
-        self._stay_task.cancel()
-        for p in list(self.players.values()):
-            p.task.cancel()
-            vc = p.guild.voice_client
-            if vc:
-                try:
-                    await vc.disconnect()
-                except Exception:
-                    pass
-        self.players.clear()
-
-    # ── 24/7 voice presence ──
     async def cog_load(self):
         self.down_since = {}
         self.next_try = {}
         self.fails = {}
         self._stay_task = asyncio.create_task(self._stay_loop())
 
+    async def cog_unload(self):
+        self._stay_task.cancel()
+        await asyncio.gather(self._stay_task, return_exceptions=True)
+        players = list(self.players.values())
+        for player in players:
+            player.task.cancel()
+            await player.end_panel()
+            voice = player.guild.voice_client
+            if voice:
+                try:
+                    await voice.disconnect()
+                except discord.HTTPException as error:
+                    print(f"[music] couldn't disconnect during unload: {error}")
+        await asyncio.gather(*(player.task for player in players), return_exceptions=True)
+        self.players.clear()
+
+    def player(self, guild):
+        player = self.players.get(guild.id)
+        if player is None:
+            player = self.players[guild.id] = GuildPlayer(self, guild)
+        return player
+
+    async def connect(self, guild, channel):
+        lv = _lavalink()
+        voice = guild.voice_client
+        if voice:
+            if voice.is_connected():
+                if voice.channel.id != channel.id:
+                    await voice.move_to(channel)
+                return
+            try:
+                await voice.disconnect(force=True)
+            except (discord.HTTPException, asyncio.TimeoutError) as error:
+                raise MusicError(f"Couldn't clear the stale voice connection ({type(error).__name__}).")
+        try:
+            await channel.connect(
+                cls=lv.LavalinkVoiceClient,
+                self_deaf=True,
+                timeout=20,
+            )
+        except lv.LavalinkError as error:
+            raise MusicError(str(error))
+        except (discord.ClientException, discord.HTTPException, asyncio.TimeoutError) as error:
+            raise MusicError(f"Couldn't join that voice channel ({type(error).__name__}).")
+
     async def stay_join(self, guild, channel, stay=True):
-        perms = channel.permissions_for(guild.me)
-        if not (perms.view_channel and perms.connect):
-            raise MusicError(f"I need **View Channel** and **Connect** for **{channel.name}**.")
+        permissions = channel.permissions_for(guild.me)
+        if not (permissions.view_channel and permissions.connect):
+            raise MusicError(f"I need View Channel and Connect permission for {channel.name}.")
         await self.connect(guild, channel)
         if stay:
             data["stay"][str(guild.id)] = channel.id
@@ -696,38 +622,39 @@ class Music(BaseCog):
         save_data()
         self.down_since.pop(guild.id, None)
         self.fails.pop(guild.id, None)
-        return (f"📌 Joined **{channel.name}** and I'll stay here 24/7. Use `/leave` to stop."
-                if stay else f"✅ Joined **{channel.name}** (I'll leave when idle).")
+        if stay:
+            return f"📌 Joined **{channel.name}** and will stay 24/7. Use `/leave` to stop."
+        return f"✅ Joined **{channel.name}**; I'll leave when idle."
 
     async def leave_guild(self, guild):
-        was_stay = data["stay"].pop(str(guild.id), None) is not None
+        was_staying = data["stay"].pop(str(guild.id), None) is not None
         save_data()
-        p = self.players.get(guild.id)
-        if p is not None:
-            await p.destroy()
+        player = self.players.get(guild.id)
+        if player:
+            await player.destroy()
         elif guild.voice_client:
             await guild.voice_client.disconnect()
-        elif not was_stay:
+        elif not was_staying:
             raise MusicError("I'm not in a voice channel.")
 
     async def _stay_check(self, guild_id, channel_id, now):
         guild = self.bot.get_guild(guild_id)
         if guild is None:
             return
-        channel = guild.get_channel(channel_id)
+        channel = guild.get_channel(int(channel_id))
         if channel is None:
             data["stay"].pop(str(guild_id), None)
             save_data()
             return
-        vc = guild.voice_client
-        if vc is not None and vc.is_connected():
+        voice = guild.voice_client
+        if voice and voice.is_connected():
             self.down_since.pop(guild_id, None)
             self.fails.pop(guild_id, None)
-            if vc.channel.id != channel_id:
+            if voice.channel.id != channel.id:
                 try:
-                    await vc.move_to(channel)
-                except (discord.HTTPException, asyncio.TimeoutError):
-                    pass
+                    await voice.move_to(channel)
+                except (discord.HTTPException, asyncio.TimeoutError) as error:
+                    print(f"[24/7] couldn't move back to {channel.name}: {error}")
             return
         down = self.down_since.setdefault(guild_id, now)
         if now - down < STAY_GRACE or now < self.next_try.get(guild_id, 0):
@@ -736,96 +663,73 @@ class Music(BaseCog):
             await self.connect(guild, channel)
             self.down_since.pop(guild_id, None)
             self.fails.pop(guild_id, None)
-            print(f"[24/7] back in '{channel.name}' ({guild.name})")
-        except Exception as e:
-            n = self.fails[guild_id] = self.fails.get(guild_id, 0) + 1
-            self.next_try[guild_id] = now + min(300, 15 * 2 ** n)
-            if n == 1:
-                print(f"[24/7] can't rejoin '{channel.name}' in {guild.name}: {e}")
+            print(f"[24/7] rejoined {channel.name} in {guild.name}")
+        except (MusicError, discord.HTTPException, asyncio.TimeoutError) as error:
+            count = self.fails[guild_id] = self.fails.get(guild_id, 0) + 1
+            self.next_try[guild_id] = now + min(300, 15 * 2 ** count)
+            if count == 1:
+                print(f"[24/7] couldn't rejoin {channel.name} in {guild.name}: {error}")
 
     async def _stay_loop(self):
         await self.bot.wait_until_ready()
         while True:
             try:
                 now = time.monotonic()
-                for gid, cid in list(data["stay"].items()):
-                    await self._stay_check(int(gid), cid, now)
+                for guild_id, channel_id in list(data["stay"].items()):
+                    await self._stay_check(int(guild_id), channel_id, now)
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
-                print(f"[24/7] watchdog error: {type(e).__name__}: {e}")
+            except Exception as error:
+                print(f"[24/7] watchdog error: {type(error).__name__}: {error}")
             await asyncio.sleep(STAY_INTERVAL)
-
-    def player(self, guild):
-        p = self.players.get(guild.id)
-        if p is None:
-            p = self.players[guild.id] = GuildPlayer(self, guild)
-        return p
-
-    async def connect(self, guild, channel):
-        vc = guild.voice_client
-        if vc and vc.is_connected():
-            if vc.channel.id != channel.id:
-                await vc.move_to(channel)
-        else:
-            kwargs = {"self_deaf": True}
-            lv = _lava()
-            if lv is not None:
-                kwargs["cls"] = lv.LavalinkVoiceClient
-            elif config.MUSIC_BACKEND == "lavalink":
-                raise MusicError("The Lavalink server isn't connected right now. Try again in a moment, "
-                                 "or run `/musicdiag`.")
-            try:
-                await channel.connect(**kwargs)
-            except BotError:
-                raise
-            except (asyncio.TimeoutError, discord.ClientException):
-                raise MusicError("I couldn't join that voice channel. Check my Connect permission and try again.")
 
     async def cog_check(self, ctx):
         return ctx.guild is not None and has_access(ctx.author.id)
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
-        if member.id == self.bot.user.id and after.channel is None:
-            p = self.players.pop(member.guild.id, None)
-            if p:
-                p.queue.clear()
-                p.task.cancel()
+        if self.bot.user and member.id == self.bot.user.id and after.channel is None:
+            player = self.players.pop(member.guild.id, None)
+            if player:
+                player.queue.clear()
+                player.task.cancel()
 
-    # ── commands ──
-    @commands.hybrid_command(name="play", aliases=["p"], description="Play a song, playlist or link (YouTube, YT Music, Spotify, SoundCloud...)")
-    @app_commands.describe(query="Song name or a YouTube / Spotify / SoundCloud link")
+    @commands.hybrid_command(
+        name="play",
+        aliases=["p"],
+        description="Play a song, playlist, or supported music link",
+    )
+    @app_commands.describe(query="Song name or YouTube, Spotify, SoundCloud, or other supported link")
     async def play(self, ctx, *, query: str):
-        """!play <song name | YouTube / YT Music / Spotify / SoundCloud link>"""
         await ctx.defer()
-        voice = ctx.author.voice
-        if not voice or not voice.channel:
+        member_voice = ctx.author.voice
+        if not member_voice or not member_voice.channel:
             raise MusicError("Join a voice channel first.")
+        await self.connect(ctx.guild, member_voice.channel)
+        player = self.player(ctx.guild)
+        player.text_channel = ctx.channel
         try:
-            await asyncio.wait_for(self.connect(ctx.guild, voice.channel), timeout=15)
+            tracks = await asyncio.wait_for(expand(query, ctx.author.display_name), timeout=60)
         except asyncio.TimeoutError:
-            raise MusicError("Connection timed out. Check my permissions to connect to that voice channel.")
-        p = self.player(ctx.guild)
-        p.text_channel = ctx.channel
-        try:
-            tracks = await asyncio.wait_for(expand(query, ctx.author.display_name), timeout=25)
-        except asyncio.TimeoutError:
-            raise MusicError("Search timed out. The server might be rate-limited by YouTube; try SoundCloud or a direct link.")
-        n = p.add(tracks)
-        if n == 0:
+            raise MusicError("Music search timed out. Check the Lavalink service and try again.")
+        added = player.add(tracks)
+        if added == 0:
             raise MusicError("The queue is full.")
-        if n == 1:
-            t = tracks[0]
-            e = discord.Embed(title="➕ Added to queue", description=f"**{safe(t.title)}**", color=GREEN)
-            if t.thumb:
-                e.set_thumbnail(url=t.thumb)
-            e.add_field(name="Duration", value=fmt(t.duration))
-            e.add_field(name="Position", value=f"#{len(p.queue)}" if p.current else "Up next")
-            e.set_footer(text=f"Requested by {t.requester}")
-        else:
-            e = discord.Embed(title="➕ Added to queue", description=f"**{n}** tracks added.", color=GREEN)
-        await ctx.send(embed=e)
+        track = tracks[0]
+        embed = discord.Embed(
+            title="➕ Added to queue",
+            description=f"**{safe(track.title)}**" if added == 1 else f"**{added}** tracks added.",
+            color=GREEN,
+        )
+        if track.thumb and added == 1:
+            embed.set_thumbnail(url=track.thumb)
+        if added == 1:
+            embed.add_field(name="Duration", value=fmt(track.duration))
+            embed.add_field(name="Position", value=f"#{len(player.queue)}" if player.current else "Up next")
+            embed.set_footer(text=f"Requested by {track.requester}")
+        if added < len(tracks):
+            embed.set_footer(text=f"Added {added} of {len(tracks)} tracks; queue limit reached.")
+        await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="skip", aliases=["s"], description="Skip the current song")
     async def skip(self, ctx):
@@ -847,80 +751,82 @@ class Music(BaseCog):
         self.player(ctx.guild).stop()
         await ctx.send(embed=info_embed("⏹️ Stopped and cleared the queue.", RED))
 
-    @commands.hybrid_command(name="queue", aliases=["q"], description="Show the queue")
+    @commands.hybrid_command(name="queue", aliases=["q"], description="Show the music queue")
     async def queue(self, ctx):
         await ctx.send(embed=queue_embed(self.player(ctx.guild)))
 
-    @commands.hybrid_command(name="nowplaying", aliases=["np", "panel"], description="Show the Now Playing card with control buttons")
+    @commands.hybrid_command(name="nowplaying", aliases=["np", "panel"], description="Show music controls")
     async def nowplaying(self, ctx):
-        p = self.player(ctx.guild)
-        if not p.current:
+        player = self.player(ctx.guild)
+        if not player.current:
             raise MusicError("Nothing is playing.")
-        p.text_channel = ctx.channel
-        await p.end_panel()
-        p.panel = await ctx.send(embed=np_embed(p, p.current), view=PlayerView(p))
+        player.text_channel = ctx.channel
+        await player.end_panel()
+        player.panel = await ctx.send(embed=np_embed(player, player.current), view=PlayerView(player))
 
-    @commands.hybrid_command(name="volume", aliases=["vol", "v"], description="Show or set the volume (0-200%)")
-    @app_commands.describe(percent="0-200 (leave empty to just show it)")
+    @commands.hybrid_command(name="volume", aliases=["vol", "v"], description="Show or set volume (0-200%)")
+    @app_commands.describe(percent="0-200; leave empty to show the current volume")
     async def volume(self, ctx, percent: Optional[int] = None):
-        """!volume  (show)  |  !volume 80  (set, 0-200)"""
-        p = self.player(ctx.guild)
+        player = self.player(ctx.guild)
         if percent is not None:
-            p.set_volume(percent)
-        await ctx.send(embed=volume_embed(p))
+            player.set_volume(percent)
+        await ctx.send(embed=volume_embed(player))
 
-    @commands.hybrid_command(name="loop", description="Set loop mode")
-    @app_commands.describe(mode="off, track or queue")
+    @commands.hybrid_command(name="loop", description="Set music loop mode")
+    @app_commands.describe(mode="off, track, or queue")
     async def loop(self, ctx, mode: Literal["off", "track", "queue"] = "track"):
-        """!loop off | track | queue"""
-        p = self.player(ctx.guild)
-        p.set_loop(mode)
-        icon = {"off": "➡️ Loop off", "track": "🔂 Looping the current track", "queue": "🔁 Looping the queue"}[p.loop_mode]
-        await ctx.send(embed=info_embed(icon))
+        player = self.player(ctx.guild)
+        player.set_loop(mode)
+        message = {
+            "off": "➡️ Loop off",
+            "track": "🔂 Looping the current track",
+            "queue": "🔁 Looping the queue",
+        }[mode]
+        await ctx.send(embed=info_embed(message))
 
     @commands.hybrid_command(name="shuffle", description="Shuffle the queue")
     async def shuffle(self, ctx):
         self.player(ctx.guild).shuffle()
         await ctx.send(embed=info_embed("🔀 Queue shuffled."))
 
-    @commands.hybrid_command(name="remove", description="Remove a song from the queue")
-    @app_commands.describe(position="Queue position (see /queue)")
+    @commands.hybrid_command(name="remove", description="Remove a queued song")
+    @app_commands.describe(position="Queue position")
     async def remove(self, ctx, position: int):
-        t = self.player(ctx.guild).remove(position)
-        await ctx.send(embed=info_embed(f"🗑️ Removed **{safe(t.title)}**"))
+        track = self.player(ctx.guild).remove(position)
+        await ctx.send(embed=info_embed(f"🗑️ Removed **{safe(track.title)}**"))
 
-    @commands.hybrid_command(name="join", description="Join a voice channel and stay there 24/7")
-    @app_commands.describe(channel="Voice channel (default: the one you're in)", stay="Stay 24/7 (default: yes)")
+    @commands.hybrid_command(name="join", description="Join a voice channel and optionally stay 24/7")
+    @app_commands.describe(channel="Voice channel (defaults to yours)", stay="Stay 24/7 (default: yes)")
     async def join(self, ctx, channel: Optional[discord.VoiceChannel] = None, stay: bool = True):
         await ctx.defer()
         if channel is None:
             channel = ctx.author.voice.channel if ctx.author.voice else None
         if channel is None:
-            raise MusicError("Join a voice channel or pick one: `/join channel:#General`.")
+            raise MusicError("Join a voice channel or choose one with `/join channel:#General`.")
         text = await self.stay_join(ctx.guild, channel, stay)
         await ctx.send(embed=info_embed(text, GREEN))
 
-    @commands.hybrid_command(name="leave", aliases=["disconnect", "dc"], description="Leave the voice channel (and stop 24/7 mode)")
+    @commands.hybrid_command(name="leave", aliases=["disconnect", "dc"], description="Leave voice and disable 24/7")
     async def leave(self, ctx):
         await self.leave_guild(ctx.guild)
         await ctx.send(embed=info_embed("👋 Left the voice channel. 24/7 mode is off."))
 
-    @commands.hybrid_command(name="help", description="Show the music commands")
+    @commands.hybrid_command(name="help", description="Show music commands")
     async def help(self, ctx):
-        p = config.PREFIX
-        e = discord.Embed(title="🎵 Music commands", color=BLURPLE,
-                          description="Play from YouTube, YouTube Music, Spotify, SoundCloud and more.")
-        e.add_field(name="Play", value=f"`{p}play <name or link>`\n`{p}queue`  `{p}nowplaying`", inline=False)
-        e.add_field(name="Control", value=f"`{p}skip`  `{p}pause`  `{p}resume`  `{p}stop`  `{p}leave`", inline=False)
-        e.add_field(name="Tune", value=f"`{p}volume <0-200>`  `{p}loop off|track|queue`\n`{p}shuffle`  `{p}remove <number>`", inline=False)
-        e.add_field(name="Debug", value=f"`/musicdiag` – test FFmpeg, yt-dlp, voice libs, Lavalink", inline=False)
-        e.set_footer(text="Tip: use the buttons under the Now Playing card for volume, pause, skip and more.")
-        await ctx.send(embed=e)
+        prefix = config.PREFIX
+        embed = discord.Embed(
+            title="🎵 Music commands",
+            color=BLURPLE,
+            description="Search and play music through the configured Lavalink server.",
+        )
+        embed.add_field(name="Play", value=f"`{prefix}play <name or link>`\n`{prefix}queue`  `{prefix}nowplaying`", inline=False)
+        embed.add_field(name="Control", value=f"`{prefix}skip`  `{prefix}pause`  `{prefix}resume`  `{prefix}stop`  `{prefix}leave`", inline=False)
+        embed.add_field(name="Tune", value=f"`{prefix}volume <0-200>`  `{prefix}loop off|track|queue`\n`{prefix}shuffle`  `{prefix}remove <number>`", inline=False)
+        embed.add_field(name="Setup", value="`/musicdiag` checks the Lavalink connection.", inline=False)
+        embed.set_footer(text="Use the buttons under Now Playing for quick controls.")
+        await ctx.send(embed=embed)
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Console commands
-# ═══════════════════════════════════════════════════════════════
 def _cog(bot):
     cog = bot.get_cog("Music")
     if cog is None:
@@ -929,160 +835,157 @@ def _cog(bot):
 
 
 def _player(bot):
-    g = need_guild(bot)
-    return _cog(bot).player(g) if g else None
+    guild = need_guild(bot)
+    return _cog(bot).player(guild) if guild else None
 
 
 async def c_join(bot, args):
-    g = need_guild(bot)
-    if not g:
+    guild = need_guild(bot)
+    if not guild:
         return
     stay = not (args and args[-1].lower() == "temp")
     name = " ".join(args[:-1] if not stay else args)
-    ch = find_vc(g, name) if name else None
-    if not ch:
-        print("Usage: join <channel> [temp]   (number, ID or name - see 'channels'; 'temp' = don't stay 24/7)")
+    channel = find_vc(guild, name) if name else None
+    if not channel:
+        print("Usage: join <channel> [temp]   (number, ID or name - see 'channels')")
         return
-    print((await _cog(bot).stay_join(g, ch, stay)).replace("**", "").replace("`", ""))
+    print((await _cog(bot).stay_join(guild, channel, stay)).replace("**", "").replace("`", ""))
 
 
 async def c_leave(bot, args):
-    g = need_guild(bot)
-    if g:
-        await _cog(bot).leave_guild(g)
+    guild = need_guild(bot)
+    if guild:
+        await _cog(bot).leave_guild(guild)
         print("Left the voice channel. 24/7 mode is off.")
 
 
 async def c_play(bot, args):
-    g = need_guild(bot)
-    if not g:
+    guild = need_guild(bot)
+    if not guild:
         return
     if not args:
         print("Usage: play <song name or link>")
         return
-    if not (g.voice_client and g.voice_client.is_connected()):
+    if not guild.voice_client or not guild.voice_client.is_connected():
         print("I'm not in a voice channel. Use: join <channel>")
         return
-    p = _cog(bot).player(g)
+    player = _cog(bot).player(guild)
     print("Searching...")
     tracks = await expand(" ".join(args), "console")
-    n = p.add(tracks)
-    print(f"Queued {n} track(s)." if n else "The queue is full.")
+    added = player.add(tracks)
+    print(f"Queued {added} track(s)." if added else "The queue is full.")
 
 
 async def c_skip(bot, args):
-    p = _player(bot)
-    if p:
-        p.skip()
+    player = _player(bot)
+    if player:
+        player.skip()
         print("Skipped.")
 
 
 async def c_pause(bot, args):
-    p = _player(bot)
-    if p:
-        p.pause()
+    player = _player(bot)
+    if player:
+        player.pause()
         print("Paused.")
 
 
 async def c_resume(bot, args):
-    p = _player(bot)
-    if p:
-        p.resume()
+    player = _player(bot)
+    if player:
+        player.resume()
         print("Resumed.")
 
 
 async def c_mstop(bot, args):
-    p = _player(bot)
-    if p:
-        p.stop()
+    player = _player(bot)
+    if player:
+        player.stop()
         print("Stopped and cleared the queue.")
 
 
 async def c_queue(bot, args):
-    p = _player(bot)
-    if p:
-        print(p.queue_text().replace("**", "").replace("`", ""))
+    player = _player(bot)
+    if player:
+        print(player.queue_text().replace("**", "").replace("`", ""))
 
 
 async def c_np(bot, args):
-    p = _player(bot)
-    if p:
-        t = p.current
-        print(f"Now playing: {t.title} [{fmt(t.duration)}]" if t else "Nothing is playing.")
+    player = _player(bot)
+    if player:
+        track = player.current
+        print(f"Now playing: {track.title} [{fmt(track.duration)}]" if track else "Nothing is playing.")
 
 
 async def c_volume(bot, args):
-    p = _player(bot)
-    if not p:
+    player = _player(bot)
+    if not player:
         return
     try:
-        p.set_volume(int(args[0]))
+        player.set_volume(int(args[0]))
         print(f"Volume: {args[0]}%")
     except (IndexError, ValueError):
         print("Usage: volume <0-200>")
 
 
 async def c_loop(bot, args):
-    p = _player(bot)
-    if p:
-        p.set_loop((args[0] if args else "track").lower())
-        print(f"Loop: {p.loop_mode}")
+    player = _player(bot)
+    if player:
+        player.set_loop((args[0] if args else "track").lower())
+        print(f"Loop: {player.loop_mode}")
 
 
 async def c_shuffle(bot, args):
-    p = _player(bot)
-    if p:
-        p.shuffle()
+    player = _player(bot)
+    if player:
+        player.shuffle()
         print("Queue shuffled.")
 
 
 async def c_remove(bot, args):
-    p = _player(bot)
-    if not p:
+    player = _player(bot)
+    if not player:
         return
     try:
-        t = p.remove(int(args[0]))
-        print(f"Removed {t.title}")
+        track = player.remove(int(args[0]))
+        print(f"Removed {track.title}")
     except (IndexError, ValueError):
         print("Usage: remove <position>")
 
 
 async def c_hq(bot, args):
-    g = need_guild(bot)
-    if not g:
+    guild = need_guild(bot)
+    if not guild:
         return
-    vc = g.voice_client
-    if not vc or not vc.is_connected():
+    voice = guild.voice_client
+    if not voice or not voice.is_connected():
         print("Join a voice channel first.")
         return
-    limit = int(g.bitrate_limit)
     try:
-        await vc.channel.edit(bitrate=limit)
-        print(f"Channel bitrate set to {limit // 1000} kbps (the max for this server's boost level).")
+        bitrate = int(guild.bitrate_limit)
+        await voice.channel.edit(bitrate=bitrate)
+        print(f"Channel bitrate set to {bitrate // 1000} kbps.")
     except discord.Forbidden:
-        print("[!] The bot needs the Manage Channels permission to change the bitrate.")
+        print("[!] The bot needs Manage Channels permission to change the bitrate.")
 
 
-# ═══════════════════════════════════════════════════════════════
-#  setup / teardown
-# ═══════════════════════════════════════════════════════════════
 async def setup(bot):
     await bot.add_cog(Music(bot))
-    a = bot.add_console
-    a("join", c_join, "join <channel> [temp]", "join a voice channel and stay 24/7", group=GROUP)
-    a("leave", c_leave, "leave", "bot leaves voice", group=GROUP)
-    a("play", c_play, "play <name or link>", "YouTube / YT Music / Spotify / SoundCloud", aliases=("p",), group=GROUP)
-    a("skip", c_skip, "skip", "skip current track", group=GROUP)
-    a("pause", c_pause, "pause", "pause", group=GROUP)
-    a("resume", c_resume, "resume", "resume", group=GROUP)
-    a("mstop", c_mstop, "mstop", "stop music and clear queue", group=GROUP)
-    a("queue", c_queue, "queue", "show the queue", aliases=("q",), group=GROUP)
-    a("np", c_np, "np", "now playing", group=GROUP)
-    a("volume", c_volume, "volume <0-200>", "set volume", aliases=("vol",), group=GROUP)
-    a("loop", c_loop, "loop off|track|queue", "loop mode", group=GROUP)
-    a("shuffle", c_shuffle, "shuffle", "shuffle the queue", group=GROUP)
-    a("remove", c_remove, "remove <position>", "remove a queued track", group=GROUP)
-    a("hq", c_hq, "hq", "set channel bitrate to the server max", group=GROUP)
+    add = bot.add_console
+    add("join", c_join, "join <channel> [temp]", "join a voice channel and stay 24/7", group=GROUP)
+    add("leave", c_leave, "leave", "bot leaves voice", group=GROUP)
+    add("play", c_play, "play <name or link>", "search and play through Lavalink", aliases=("p",), group=GROUP)
+    add("skip", c_skip, "skip", "skip the current track", group=GROUP)
+    add("pause", c_pause, "pause", "pause playback", group=GROUP)
+    add("resume", c_resume, "resume", "resume playback", group=GROUP)
+    add("mstop", c_mstop, "mstop", "stop music and clear the queue", group=GROUP)
+    add("queue", c_queue, "queue", "show the queue", aliases=("q",), group=GROUP)
+    add("np", c_np, "np", "show the current track", group=GROUP)
+    add("volume", c_volume, "volume <0-200>", "set volume", aliases=("vol",), group=GROUP)
+    add("loop", c_loop, "loop off|track|queue", "set loop mode", group=GROUP)
+    add("shuffle", c_shuffle, "shuffle", "shuffle the queue", group=GROUP)
+    add("remove", c_remove, "remove <position>", "remove a queued track", group=GROUP)
+    add("hq", c_hq, "hq", "set the voice-channel bitrate to the server maximum", group=GROUP)
 
 
 async def teardown(bot):

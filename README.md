@@ -1,10 +1,12 @@
 === RUN ON YOUR WINDOWS PC ===
-1. pip install -U "discord.py[voice]" "yt-dlp[default]"
-2. winget install Gyan.FFmpeg
-3. winget install DenoLand.Deno      (close + reopen CMD after 2 and 3)
-4. Put your bot token in config.py   (or set DISCORD_TOKEN)
-5. Optional AI:  set GEMINI_API_KEY=your_key      (never put it in a file)
-6. python main.py     -> type 'help' at the > prompt
+1. pip install -r requirements.txt
+2. Set DISCORD_TOKEN and OWNER_ID in your environment.
+3. Run a Lavalink 4.2+ server and set LAVALINK_HOST, LAVALINK_PORT, and LAVALINK_PASSWORD.
+4. Optional AI voice messages: install FFmpeg. Optional AI chat: set GEMINI_API_KEY.
+5. python main.py     -> type 'help' at the > prompt
+
+Music playback and song search require Lavalink; there is no direct-FFmpeg music fallback.
+See README.txt for Railway and Docker Lavalink setup.
 
 === ACCESS ===
 Owner = full control. Trusted users = music, moveall, party, mute/deafen, AI. Everyone else is ignored.
@@ -70,11 +72,12 @@ in your language. Audio is sent to Google for that one request and is not stored
 
 === HOST ON RAILWAY ===
 1. Put this folder in a PRIVATE GitHub repo (.gitignore keeps .env / data.json out).
-2. Railway -> New Project -> Deploy from GitHub repo (builds the Dockerfile).
-3. Variables:  DISCORD_TOKEN, OWNER_ID, GEMINI_API_KEY, DATA_FILE=/data/data.json,
-   (optional) SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, YTDL_COOKIES
-4. Add a Volume mounted at /data  (keeps trust list, targets, voice rooms across deploys)
-5. Logs should show "Logged in as ..." and "running headless" (normal on Railway).
+2. Deploy the bot service from the repo root and set DISCORD_TOKEN, OWNER_ID, DATA_FILE=/data/data.json,
+   LAVALINK_HOST, LAVALINK_PORT=2333, and LAVALINK_PASSWORD.
+3. Add a separate Lavalink service from the same repo with Root Directory `/lavalink`.
+   Set LAVALINK_SERVER_PASSWORD there to the same value as the bot's LAVALINK_PASSWORD.
+4. Add a Volume mounted at /data to the bot service (keeps data across deploys).
+5. Optional: set GEMINI_API_KEY and Spotify client credentials. See README.txt for details.
 
 === LINUX VPS (Docker) ===
 cp .env.example .env  (edit)  ->  docker compose up -d --build

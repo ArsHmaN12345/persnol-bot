@@ -13,7 +13,7 @@ services:
     env_file: .env
     environment:
       DATA_FILE: /app/storage/data.json
-      MUSIC_BACKEND: ${MUSIC_BACKEND:-auto}
+      MUSIC_BACKEND: ${MUSIC_BACKEND:-lavalink}
       LAVALINK_HOST: lavalink
       LAVALINK_PORT: 2333
       LAVALINK_PASSWORD: ${LAVALINK_SERVER_PASSWORD:-youshallnotpass}

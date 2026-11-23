@@ -1,17 +1,12 @@
 === RUN ON YOUR WINDOWS PC ===
-1. pip install -U "discord.py[voice]" "yt-dlp[default]" davey
-2. winget install Gyan.FFmpeg
-3. winget install DenoLand.Deno      (close + reopen CMD after 2 and 3)
-4. Put your bot token in config.py   (or set DISCORD_TOKEN)
-5. Optional AI:  set GEMINI_API_KEY=your_key      (never put it in a file)
-6. python main.py     -> type 'help' at the > prompt
+1. pip install -r requirements.txt
+2. Set DISCORD_TOKEN and OWNER_ID in your environment.
+3. Run Lavalink 4.2+ and configure LAVALINK_HOST, LAVALINK_PORT, and LAVALINK_PASSWORD.
+4. Install FFmpeg only if you use AI voice-message commands.
+5. Optional AI chat: set GEMINI_API_KEY. Run `python main.py`.
 
-⚠️ IF BOT SHOWS GREEN (SPEAKING) BUT NO SOUND:
-- Discord now uses "DAVE" End-to-End Encryption for voice. You MUST install `davey`:
-    pip install -U davey
-- Make sure FFmpeg is installed and accessible in CMD:
-    ffmpeg -version
-- Run `/musicdiag` (or `musicdiag` in bot console) to verify your voice libraries.
+Music playback and song search require Lavalink; direct FFmpeg playback is not supported.
+Run `/musicdiag` to check Lavalink connectivity and search sources.
 
 === ACCESS ===
 Owner = full control. Trusted users = music, moveall, party, mute/deafen, AI. Everyone else is ignored.
@@ -75,11 +70,9 @@ in your language. Audio is sent to Google for that one request and is not stored
 (Live listening inside a voice channel is NOT included: Discord's end-to-end voice encryption blocks it
  with current libraries.)
 
-=== LAVALINK (separate audio server - optional, recommended for hosting) ===
-Lavalink is a Java audio server. The bot uses it for music instead of running ffmpeg + yt-dlp itself.
-Needs Lavalink 4.2+ (Discord's encrypted voice). The files are in the lavalink/ folder.
-FIRST run  /musicdiag  (or 'musicdiag' in CMD): it tests ffmpeg, yt-dlp, YouTube, Lavalink and the voice
-libraries and tells you what is actually broken.
+=== LAVALINK (required music server) ===
+Lavalink is a Java audio server. This bot requires Lavalink 4.2+ for music playback and search.
+The server files are in the lavalink/ folder. Run `/musicdiag` to check connectivity and search sources.
 Railway (a SECOND service in the same project):
   1. New -> GitHub repo (same repo) -> Settings -> Root Directory = /lavalink, and name the service  lavalink
   2. lavalink service Variables:  LAVALINK_SERVER_PASSWORD = <long random password>
@@ -87,7 +80,7 @@ Railway (a SECOND service in the same project):
                              LAVALINK_PASSWORD = <the same password>
   4. Redeploy the bot.  /status shows "Music engine: Lavalink ✅".
 VPS: docker compose up -d --build  (starts both).  PC: run Lavalink yourself, then set the same variables.
-MUSIC_BACKEND = auto (Lavalink when connected, otherwise the built-in engine) | lavalink | ffmpeg
+MUSIC_BACKEND = lavalink
 Sources: LAVALINK_SEARCH = ytsearch,scsearch  (SoundCloud is the fallback when YouTube is blocked).
 If YouTube blocks the server ("Sign in to confirm you're not a bot"): in lavalink/application.yml enable
 oauth or pot (throwaway Google account!), or rely on SoundCloud.  Lavalink needs ~512 MB RAM.
@@ -96,7 +89,7 @@ oauth or pot (throwaway Google account!), or rely on SoundCloud.  Lavalink needs
 1. Put this folder in a PRIVATE GitHub repo (.gitignore keeps .env / data.json out).
 2. Railway -> New Project -> Deploy from GitHub repo (builds the Dockerfile).
 3. Variables:  DISCORD_TOKEN, OWNER_ID, GEMINI_API_KEY, DATA_FILE=/data/data.json,
-   (optional) SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, YTDL_COOKIES
+   (optional) SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
 4. Add a Volume mounted at /data  (keeps trust list, targets, voice rooms across deploys)
 5. Logs should show "Logged in as ..." and "running headless" (normal on Railway).
 
