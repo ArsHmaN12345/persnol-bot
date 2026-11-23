@@ -386,47 +386,71 @@ async def expand(query, requester):
         raise MusicError("iCloud library files are private/DRM-protected and can't be streamed by a bot. "
                          "Send the Apple Music song link instead.")
 
+    # 1. Spotify links -> match audio stream
     m = SPOTIFY_RE.search(query)
     if m:
         pairs = await loop.run_in_executor(None, spotify_tracks, *m.groups())
-        return [Track(f"{a} - {t}", f"ytsearch1:{a} - {t} audio", requester) for t, a in pairs]
+        return [Track(f"{a} - {t}", f"scsearch1:{a} - {t}", requester) for t, a in pairs]
 
+    # 2. Apple Music links -> match audio stream
     if "music.apple.com" in query:
         pairs = await loop.run_in_executor(None, apple_tracks, query)
-        return [Track(f"{a} - {t}", f"ytsearch1:{a} - {t} audio", requester) for t, a in pairs]
+        return [Track(f"{a} - {t}", f"scsearch1:{a} - {t}", requester) for t, a in pairs]
 
+    # 3. Direct URLs
     if query.startswith("http"):
-        url = query.replace("music.youtube.com", "www.youtube.com")
-        if "list=" in url and "watch?v=" not in url:           # a whole playlist
-            info = await loop.run_in_executor(None, extract, url, True)
-            tracks = []
-            for e in info.get("entries") or []:
-                if not e:
-                    continue
-                link = e.get("url") or (f"https://www.youtube.com/watch?v={e['id']}" if e.get("id") else None)
-                if link:
-                    tracks.append(Track(e.get("title") or "Unknown", link, requester, duration=e.get("duration")))
-            if not tracks:
-                raise MusicError("That playlist is empty or private.")
-            return tracks[:config.MAX_QUEUE]
-        info = await loop.run_in_executor(None, extract, url)
+        # If it's a YouTube link, Google Video returns 403 Forbidden to FFmpeg on datacenter/cloud IPs.
+        # We read the metadata title and match with SoundCloud so FFmpeg can actually stream it!
+        if "youtube.com" in query or "youtu.be" in query:
+            url = query.replace("music.youtube.com", "www.youtube.com")
+            if "list=" in url and "watch?v=" not in url:
+                info = await loop.run_in_executor(None, extract, url, True)
+                tracks = []
+                for e in info.get("entries") or []:
+                    if not e:
+                        continue
+                    t_name = e.get("title") or "Unknown"
+                    tracks.append(Track(t_name, f"scsearch1:{t_name}", requester, duration=e.get("duration")))
+                if not tracks:
+                    raise MusicError("That playlist is empty or private.")
+                return tracks[:config.MAX_QUEUE]
+
+            info = await loop.run_in_executor(None, extract, url)
+            title = info.get("title") or "Unknown"
+            try:
+                sc_info = await loop.run_in_executor(None, extract, f"scsearch1:{title}")
+                sc_entries = [e for e in (sc_info.get("entries") or []) if e]
+                if sc_entries:
+                    tr = Track.from_info(sc_entries[0], requester)
+                    tr.title = title
+                    return [tr]
+            except Exception:
+                pass
+            return [Track.from_info(info, requester)]
+
+        info = await loop.run_in_executor(None, extract, query)
         if info.get("entries"):
             return [Track.from_info(e, requester) for e in info["entries"] if e][:config.MAX_QUEUE]
         return [Track.from_info(info, requester)]
 
+    # 4. Search text (e.g. /play song name)
+    # Search SoundCloud first: SoundCloud CDN links work 100% with FFmpeg without Google 403 Forbidden errors!
+    entries = []
     try:
-        info = await loop.run_in_executor(None, extract, f"ytsearch1:{query}")
+        info = await loop.run_in_executor(None, extract, f"scsearch1:{query}")
         entries = [e for e in (info.get("entries") or []) if e]
-    except MusicError as e:
-        err_text = str(e).lower()
-        if "bot" in err_text or "sign in" in err_text or "403" in err_text:
-            print(f"[music] YouTube search blocked on this IP ({e}); trying SoundCloud...")
-            info = await loop.run_in_executor(None, extract, f"scsearch1:{query}")
-            entries = [e for e in (info.get("entries") or []) if e]
-        else:
-            raise
+    except Exception:
+        entries = []
+
     if not entries:
-        raise MusicError("No results.")
+        try:
+            info = await loop.run_in_executor(None, extract, f"ytsearch1:{query}")
+            entries = [e for e in (info.get("entries") or []) if e]
+        except Exception:
+            entries = []
+
+    if not entries:
+        raise MusicError("No results found.")
     return [Track.from_info(entries[0], requester)]
 
 
