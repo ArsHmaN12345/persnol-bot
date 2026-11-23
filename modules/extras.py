@@ -31,27 +31,7 @@ def status_embed(bot):
     else:
         ai_text = f"`{ai.client.model}`"
     rooms = len(data["jtc"]["rooms"])
-    try:
-        import yt_dlp
-        ytv = yt_dlp.version.__version__
-    except Exception:
-        ytv = "?"
-    e = discord.Embed(title="📊 Bot status", color=BLURPLE)
-    e.add_field(name="Latency", value=f"{round(bot.latency * 1000)} ms")
-    e.add_field(name="Uptime", value=_uptime(time.time() - bot.started_at))
-    e.add_field(name="Servers", value=str(len(bot.guilds)))
-    e.add_field(name="Music", value=f"{playing} playing")
-    e.add_field(name="Voice rooms", value=str(rooms))
-    e.add_field(name="Trusted users", value=str(len(data["trusted"])))
-    e.add_field(name="AI", value=ai_text)
-    try:
-        from modules import lavalink as lv
-        node = lv.NODE
-        engine = "ffmpeg (built-in)" if node is None else ("Lavalink ✅" if node.ready else "Lavalink ❌ (using ffmpeg)")
-    except Exception:
-        engine = "ffmpeg (built-in)"
-    e.add_field(name="Music engine", value=engine)
-    e.set_footer(text=f"discord.py {discord.__version__} • yt-dlp {ytv} • Python {platform.python_version()}")
+    e.set_footer(text=f"discord.py {discord.__version__} • Python {platform.python_version()}")
     return e
 
 

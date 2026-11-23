@@ -1,13 +1,5 @@
-"""Music module – reliable playback backend.
-
-Sources: YouTube, YouTube Music, SoundCloud, Spotify links, Apple Music links.
-Backend: yt-dlp + FFmpeg (built-in) or Lavalink (optional).
-
-Key fixes vs. the old backend:
- - HTTP headers from yt-dlp are forwarded to FFmpeg (the #1 cause of "no sound").
- - `-nostdin` prevents FFmpeg from hanging on Windows.
- - Stream URLs are re-extracted after 5 min (YouTube URLs expire).
- - FFmpeg errors are logged clearly so you can see what's wrong.
+"""Music module – direct link and Lavalink playback engine.
+Plays audio links from anywhere using FFmpeg or Lavalink. No yt-dlp dependency.
 """
 import asyncio
 import base64
@@ -29,7 +21,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from typing import Literal, Optional
-import yt_dlp
 
 import config
 from utils import data, save_data, need_guild, find_vc, has_access, is_owner, BotError
@@ -54,23 +45,6 @@ def _lava():
     except Exception:
         return None
     return lv if lv.NODE is not None and lv.NODE.ready else None
-
-
-# ═══════════════════════════════════════════════════════════════
-#  yt-dlp options
-# ═══════════════════════════════════════════════════════════════
-YTDL_OPTS = {
-    "format": "bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "default_search": "auto",
-    "socket_timeout": 10,                 # 10s timeout prevents hanging on Railway / cloud
-    "retries": 2,
-    "playlistend": config.MAX_QUEUE,
-}
-if config.YTDL_COOKIEFILE:
-    YTDL_OPTS["cookiefile"] = config.YTDL_COOKIEFILE
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -166,23 +140,7 @@ def np_embed(p, track):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  yt-dlp extraction
-# ═══════════════════════════════════════════════════════════════
-def extract(query, flat=False):
-    """Run yt-dlp on *query* and return the info dict (which includes http_headers)."""
-    opts = dict(YTDL_OPTS)
-    if flat:
-        opts.update(extract_flat="in_playlist", noplaylist=False)
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(query, download=False)
-    except yt_dlp.utils.DownloadError as e:
-        msg = str(e).replace("ERROR: ", "").splitlines()[0]
-        raise MusicError(msg[:220])
-
-
-# ═══════════════════════════════════════════════════════════════
-#  Spotify  (metadata → YouTube match)
+#  Spotify
 # ═══════════════════════════════════════════════════════════════
 _sp = {"token": None, "exp": 0}
 SPOTIFY_RE = re.compile(r"open\.spotify\.com/(?:intl-[a-z]+/)?(track|album|playlist)/([A-Za-z0-9]+)")
@@ -245,32 +203,6 @@ def spotify_tracks(kind, ident):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Apple Music  (iTunes lookup → YouTube match)
-# ═══════════════════════════════════════════════════════════════
-def apple_tracks(url):
-    m = re.search(r"music\.apple\.com/([a-z]{2})/(album|song|playlist)/[^/?]+/([\w.\-]+)", url)
-    if not m:
-        raise MusicError("Unsupported Apple Music link. Use a song or album link.")
-    cc, kind, ident = m.groups()
-    if kind == "playlist":
-        raise MusicError("Apple Music playlists can't be read without an Apple developer account. "
-                         "Use a song/album link or a YouTube playlist.")
-    q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-    extra = ""
-    if "i" in q:
-        ident = q["i"][0]
-    elif kind == "album":
-        extra = "&entity=song"
-    api = f"https://itunes.apple.com/lookup?id={ident}&country={cc}{extra}"
-    with urllib.request.urlopen(api, timeout=15) as r:
-        res = json.load(r).get("results", [])
-    out = [(x["trackName"], x["artistName"]) for x in res if x.get("kind") == "song"]
-    if not out:
-        raise MusicError("Couldn't read that Apple Music link.")
-    return out[:config.MAX_QUEUE]
-
-
-# ═══════════════════════════════════════════════════════════════
 #  Track
 # ═══════════════════════════════════════════════════════════════
 class Track:
@@ -306,37 +238,11 @@ class Track:
         )
 
     async def ensure_stream(self):
-        """(Re-)resolve the stream URL right before playback.
-
-        Always refreshes when the URL is older than _URL_TTL, because YouTube
-        stream URLs expire and playing an expired URL = silence with no error.
-        """
-        if self.stream_url and time.time() - self.resolved_at < _URL_TTL:
+        """Ensure stream URL is available."""
+        if self.stream_url:
             return
-        print(f"[music] resolving stream for: {self.title}")
-        loop = asyncio.get_running_loop()
-        try:
-            info = await loop.run_in_executor(None, extract, self.query)
-        except MusicError as e:
-            # When hosting on Railway/cloud, YouTube blocks IPs with bot checks; fallback to SoundCloud
-            err_text = str(e).lower()
-            if ("bot" in err_text or "sign in" in err_text or "403" in err_text) and not self.query.startswith("http"):
-                print(f"[music] YouTube stream failed ({e}); trying SoundCloud fallback for: {self.title}")
-                info = await loop.run_in_executor(None, extract, f"scsearch1:{self.title}")
-            else:
-                raise
-        if info.get("entries"):
-            info = next((e for e in info["entries"] if e), None)
-            if info is None:
-                raise MusicError("No results.")
-        if not info.get("url"):
-            raise MusicError("Could not get an audio stream.")
-        self.stream_url = info["url"]
-        self.headers = info.get("http_headers") or {}     # ← always refresh headers too
-        self.resolved_at = time.time()
-        self.duration = self.duration or info.get("duration")
-        self.page = self.page or info.get("webpage_url")
-        self.thumb = self.thumb or info.get("thumbnail")
+        if not self.stream_url:
+            self.stream_url = self.query
 
 
 def track_from_lava(t, requester):
@@ -349,18 +255,12 @@ def track_from_lava(t, requester):
 #  expand()  –  turn a link or search text into a list of Tracks
 # ═══════════════════════════════════════════════════════════════
 async def expand_lavalink(lv, query, requester):
-    """Same as expand(), but through the Lavalink server (no yt-dlp needed)."""
+    """Lavalink resolver for links and search queries (no yt-dlp needed)."""
     loop = asyncio.get_running_loop()
     node = lv.NODE
-    if "icloud.com" in query:
-        raise MusicError("iCloud library files are private/DRM-protected and can't be streamed by a bot. "
-                         "Send the Apple Music song link instead.")
     m = SPOTIFY_RE.search(query)
     if m:
         pairs = await loop.run_in_executor(None, spotify_tracks, *m.groups())
-        return [Track(f"{a} - {t}", f"{a} - {t}", requester) for t, a in pairs]
-    if "music.apple.com" in query:
-        pairs = await loop.run_in_executor(None, apple_tracks, query)
         return [Track(f"{a} - {t}", f"{a} - {t}", requester) for t, a in pairs]
     is_url = query.startswith(("http://", "https://"))
     try:
@@ -368,90 +268,40 @@ async def expand_lavalink(lv, query, requester):
     except lv.LavalinkError as e:
         raise MusicError(str(e))
     if not found:
-        raise MusicError("No results.")
+        raise MusicError("No results found.")
     if not is_url:
         found = found[:1]
     return [track_from_lava(t, requester) for t in found[:config.MAX_QUEUE]]
 
 
 async def expand(query, requester):
-    """Turn a link or search text into a list of Tracks."""
+    """Play directly from links or through Lavalink (zero yt-dlp dependency)."""
     loop = asyncio.get_running_loop()
     query = query.strip()
     lv = _lava()
     if lv is not None:
         return await expand_lavalink(lv, query, requester)
 
-    if "icloud.com" in query:
-        raise MusicError("iCloud library files are private/DRM-protected and can't be streamed by a bot. "
-                         "Send the Apple Music song link instead.")
-
-    # 1. Spotify links -> match audio stream
+    # 1. Spotify links
     m = SPOTIFY_RE.search(query)
     if m:
-        pairs = await loop.run_in_executor(None, spotify_tracks, *m.groups())
-        return [Track(f"{a} - {t}", f"scsearch1:{a} - {t}", requester) for t, a in pairs]
+        raise MusicError("Spotify links require the Lavalink backend. Enable Lavalink on Railway or paste a direct audio link.")
 
-    # 2. Apple Music links -> match audio stream
-    if "music.apple.com" in query:
-        pairs = await loop.run_in_executor(None, apple_tracks, query)
-        return [Track(f"{a} - {t}", f"scsearch1:{a} - {t}", requester) for t, a in pairs]
-
-    # 3. Direct URLs
-    if query.startswith("http"):
-        # If it's a YouTube link, Google Video returns 403 Forbidden to FFmpeg on datacenter/cloud IPs.
-        # We read the metadata title and match with SoundCloud so FFmpeg can actually stream it!
+    # 2. Direct audio / stream URLs from anywhere
+    if query.startswith(("http://", "https://")):
+        # If it's YouTube without Lavalink
         if "youtube.com" in query or "youtu.be" in query:
-            url = query.replace("music.youtube.com", "www.youtube.com")
-            if "list=" in url and "watch?v=" not in url:
-                info = await loop.run_in_executor(None, extract, url, True)
-                tracks = []
-                for e in info.get("entries") or []:
-                    if not e:
-                        continue
-                    t_name = e.get("title") or "Unknown"
-                    tracks.append(Track(t_name, f"scsearch1:{t_name}", requester, duration=e.get("duration")))
-                if not tracks:
-                    raise MusicError("That playlist is empty or private.")
-                return tracks[:config.MAX_QUEUE]
+            raise MusicError("YouTube links on cloud servers require Lavalink (see /status) to prevent 403 blocks. Connect Lavalink or paste a direct audio/stream link.")
 
-            info = await loop.run_in_executor(None, extract, url)
-            title = info.get("title") or "Unknown"
-            try:
-                sc_info = await loop.run_in_executor(None, extract, f"scsearch1:{title}")
-                sc_entries = [e for e in (sc_info.get("entries") or []) if e]
-                if sc_entries:
-                    tr = Track.from_info(sc_entries[0], requester)
-                    tr.title = title
-                    return [tr]
-            except Exception:
-                pass
-            return [Track.from_info(info, requester)]
+        # Clean title derived from the URL filename
+        parsed = urllib.parse.urlparse(query)
+        filename = parsed.path.split("/")[-1] if "/" in parsed.path else "Audio Stream"
+        filename = urllib.parse.unquote(filename).split("?")[0]
+        title = filename if len(filename) > 2 else "Direct Audio Link"
+        return [Track(title, query, requester, stream_url=query, page=query)]
 
-        info = await loop.run_in_executor(None, extract, query)
-        if info.get("entries"):
-            return [Track.from_info(e, requester) for e in info["entries"] if e][:config.MAX_QUEUE]
-        return [Track.from_info(info, requester)]
-
-    # 4. Search text (e.g. /play song name)
-    # Search SoundCloud first: SoundCloud CDN links work 100% with FFmpeg without Google 403 Forbidden errors!
-    entries = []
-    try:
-        info = await loop.run_in_executor(None, extract, f"scsearch1:{query}")
-        entries = [e for e in (info.get("entries") or []) if e]
-    except Exception:
-        entries = []
-
-    if not entries:
-        try:
-            info = await loop.run_in_executor(None, extract, f"ytsearch1:{query}")
-            entries = [e for e in (info.get("entries") or []) if e]
-        except Exception:
-            entries = []
-
-    if not entries:
-        raise MusicError("No results found.")
-    return [Track.from_info(entries[0], requester)]
+    # 3. Plain text search without Lavalink
+    raise MusicError("Please paste a direct audio link (e.g. .mp3, .m4a, .wav, web stream) or connect Lavalink to search by name.")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -598,8 +448,15 @@ class GuildPlayer:
                 self.next_event.clear()
                 kbps = max(16, min(config.AUDIO_BITRATE, vc.channel.bitrate // 1000))
                 self.kbps = kbps
+                self.proc = None
 
                 def after(err, ev=self.next_event):
+                    if self.proc:
+                        try:
+                            self.proc.kill()
+                        except Exception:
+                            pass
+                        self.proc = None
                     if err:
                         print(f"[music] ⚠ playback error: {err}")
                     loop.call_soon_threadsafe(ev.set)
@@ -609,16 +466,10 @@ class GuildPlayer:
                     if lava:
                         await vc.play_track(track, int(self.volume * 100), after)
                     else:
-                        # Build the FFmpeg source with the right HTTP headers
                         before = _ffmpeg_before(track.headers)
-                        raw = discord.FFmpegPCMAudio(
-                            track.stream_url,
-                            before_options=before,
-                            options=_FFMPEG_OPTS,
-                        )
+                        raw = discord.FFmpegPCMAudio(track.stream_url, before_options=before, options=_FFMPEG_OPTS)
                         source = discord.PCMVolumeTransformer(raw, volume=self.volume)
-                        print(f"[music] FFmpeg starting: headers={'yes' if track.headers else 'none'}, "
-                              f"url={track.stream_url[:80]}...")
+                        print(f"[music] Playing direct stream: {track.stream_url[:80]}...")
                         vc.play(source, after=after)
                 except Exception as e:
                     await self.say(f"❌ Playback failed: {e}")
@@ -725,6 +576,12 @@ class GuildPlayer:
 
     async def destroy(self):
         self.queue.clear()
+        if hasattr(self, "proc") and self.proc:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+            self.proc = None
         await self.end_panel()
         await self.set_status(None)
         await self.set_presence(None)
@@ -937,10 +794,10 @@ class Music(BaseCog):
                 p.task.cancel()
 
     # ── commands ──
-    @commands.hybrid_command(name="play", aliases=["p"], description="Play a song, playlist or link (YouTube, YT Music, Spotify, Apple Music...)")
-    @app_commands.describe(query="Song name or a YouTube / Spotify / Apple Music link")
+    @commands.hybrid_command(name="play", aliases=["p"], description="Play a song, playlist or link (YouTube, YT Music, Spotify, SoundCloud...)")
+    @app_commands.describe(query="Song name or a YouTube / Spotify / SoundCloud link")
     async def play(self, ctx, *, query: str):
-        """!play <song name | YouTube / YT Music / Spotify / Apple Music link>"""
+        """!play <song name | YouTube / YT Music / Spotify / SoundCloud link>"""
         await ctx.defer()
         voice = ctx.author.voice
         if not voice or not voice.channel:
@@ -1052,7 +909,7 @@ class Music(BaseCog):
     async def help(self, ctx):
         p = config.PREFIX
         e = discord.Embed(title="🎵 Music commands", color=BLURPLE,
-                          description="Play from YouTube, YouTube Music, Spotify, Apple Music, SoundCloud and more.")
+                          description="Play from YouTube, YouTube Music, Spotify, SoundCloud and more.")
         e.add_field(name="Play", value=f"`{p}play <name or link>`\n`{p}queue`  `{p}nowplaying`", inline=False)
         e.add_field(name="Control", value=f"`{p}skip`  `{p}pause`  `{p}resume`  `{p}stop`  `{p}leave`", inline=False)
         e.add_field(name="Tune", value=f"`{p}volume <0-200>`  `{p}loop off|track|queue`\n`{p}shuffle`  `{p}remove <number>`", inline=False)
@@ -1214,7 +1071,7 @@ async def setup(bot):
     a = bot.add_console
     a("join", c_join, "join <channel> [temp]", "join a voice channel and stay 24/7", group=GROUP)
     a("leave", c_leave, "leave", "bot leaves voice", group=GROUP)
-    a("play", c_play, "play <name or link>", "YouTube / YT Music / Spotify / Apple Music", aliases=("p",), group=GROUP)
+    a("play", c_play, "play <name or link>", "YouTube / YT Music / Spotify / SoundCloud", aliases=("p",), group=GROUP)
     a("skip", c_skip, "skip", "skip current track", group=GROUP)
     a("pause", c_pause, "pause", "pause", group=GROUP)
     a("resume", c_resume, "resume", "resume", group=GROUP)

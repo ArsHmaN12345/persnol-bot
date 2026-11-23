@@ -215,7 +215,7 @@ def _vc(env, text):
 
 
 # ---------- trusted tools: music ----------
-@tool("play_music", "Play a song, artist, playlist or link (YouTube, YouTube Music, Spotify, Apple Music, SoundCloud). "
+@tool("play_music", "Play a song, artist, playlist or link (YouTube, YouTube Music, Spotify, SoundCloud). "
       "Joins the requester's voice channel.", {"query": S("Song name or URL")}, ["query"])
 async def t_play(env, query):
     mm, cog = _mod("music"), _cog(env, "Music")

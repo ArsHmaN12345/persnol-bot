@@ -25,10 +25,6 @@ SET_PRESENCE = True         # show "Listening to <song>" on the bot's profile
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 
-# Optional: cookies.txt for yt-dlp. Helps when YouTube says "Sign in to confirm you're not a bot"
-# (common on VPS/datacenter IPs). Use a throwaway Google account, never your main one.
-YTDL_COOKIEFILE = os.getenv("YTDL_COOKIEFILE", "")
-
 # ---------- LAVALINK (optional, recommended for hosting) ----------
 # Lavalink is a separate audio server (see the lavalink/ folder). When it is connected the bot uses it for
 # music instead of ffmpeg + yt-dlp on the bot itself.
@@ -37,7 +33,7 @@ LAVALINK_HOST = os.getenv("LAVALINK_HOST", "")          # e.g. lavalink.railway.
 LAVALINK_PORT = int(os.getenv("LAVALINK_PORT", "2333"))
 LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD", "")
 LAVALINK_SECURE = os.getenv("LAVALINK_SECURE", "false").lower() in ("1", "true", "yes")   # https/wss (public nodes)
-LAVALINK_SEARCH = os.getenv("LAVALINK_SEARCH", "ytsearch,scsearch")                       # search sources, in order
+LAVALINK_SEARCH = os.getenv("LAVALINK_SEARCH", "ytsearch")                                  # search sources (YouTube)
 
 # ---------- JOIN-TO-CREATE ----------
 JTC_ALLOW_EVERYONE = True   # True = any server member can make/use their own temp room
@@ -53,12 +49,3 @@ AI_COOLDOWN = 4             # seconds between AI requests per user
 AI_MAX_STEPS = 6            # max tool-calling rounds per request
 AI_HISTORY_TURNS = 6        # how many past exchanges the AI remembers per user
 AI_MENTION = True           # @mention the bot to talk to the AI (owner/trusted only)
-
-# Railway/hosting friendly: paste the FULL contents of cookies.txt into a variable named YTDL_COOKIES
-# and it is written to a temp file automatically.
-_cookies = os.getenv("YTDL_COOKIES", "")
-if _cookies and not YTDL_COOKIEFILE:
-    import tempfile
-    YTDL_COOKIEFILE = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
-    with open(YTDL_COOKIEFILE, "w", encoding="utf-8") as _f:
-        _f.write(_cookies if _cookies.endswith("\n") else _cookies + "\n")

@@ -413,22 +413,9 @@ async def run_diag(bot):
                     + (f" (e.g. {_one_line(found[0]['title'], 50)})" if found else " - that source is probably disabled or blocked"))
             except Exception as e:
                 add("❌", f"`{prefix}:` search failed - {_one_line(e)}")
-    lines.append("**ffmpeg + yt-dlp (built-in backend)**")
+    lines.append("**FFmpeg audio engine**")
     ff = shutil.which("ffmpeg")
-    add("✅" if ff else "❌", "ffmpeg " + ("found" if ff else "NOT installed (`winget install Gyan.FFmpeg` / included in the Docker image)"))
-    try:
-        import yt_dlp
-        from modules.music import extract
-        add("✅", f"yt-dlp {yt_dlp.version.__version__}")
-        dn = shutil.which("deno")
-        add("✅" if dn else "⚠️", "deno " + ("found" if dn else "not found - YouTube extraction usually needs it (`winget install DenoLand.Deno`)"))
-        try:
-            info = await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(None, extract, "ytsearch1:never gonna give you up"), 60)
-            add("✅" if info.get("entries") else "⚠️", "YouTube test search worked")
-        except Exception as e:
-            add("❌", f"YouTube test failed - {_one_line(e)}")
-    except Exception as e:
-        add("❌", f"yt-dlp problem - {_one_line(e)}")
+    add("✅" if ff else "❌", "ffmpeg " + ("found" if ff else "NOT installed"))
     lines.append("**Voice libraries**")
     for mod, label in (("davey", "davey (Discord encrypted voice)"), ("nacl", "PyNaCl")):
         try:
