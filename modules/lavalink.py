@@ -483,7 +483,7 @@ class LavalinkCog(BaseCog):
     @commands.hybrid_command(name="musicdiag", description="Find out why music might not work (owner only)")
     async def musicdiag(self, ctx):
         async with ctx.typing():
-            lines, hints, ok = await run_diag(self.bot)
+            lines, hints, ok = await run_diag(ctx.bot)
         e = discord.Embed(title="🩺 Music check", description="\n".join(lines)[:4000], color=GREEN if ok else RED)
         if hints:
             e.add_field(name="💡 Likely fix", value="\n".join(hints)[:1000], inline=False)
