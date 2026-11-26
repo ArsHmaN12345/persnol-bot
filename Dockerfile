@@ -7,6 +7,9 @@ RUN mvn -B -DskipTests package
 # Bookworm includes the OpenJDK 17 runtime package used by the music engine.
 FROM python:3.12-slim-bookworm
 
+LABEL org.opencontainers.image.source="https://github.com/ArsHmaN12345/persnol-bot"
+LABEL org.opencontainers.image.description="Persnol Discord bot with a local Lavaplayer music engine"
+
 # FFmpeg decodes audio attachments for the AI voice-command feature.
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates openjdk-17-jre-headless \
     && rm -rf /var/lib/apt/lists/*
