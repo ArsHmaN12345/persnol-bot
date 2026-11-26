@@ -43,6 +43,7 @@ public final class LavaPlayerEngine {
 
     private final AudioPlayerManager manager = new DefaultAudioPlayerManager();
     private final Map<Long, AudioPlayer> players = new ConcurrentHashMap<>();
+    private final Map<Long, Long> startingAt = new ConcurrentHashMap<>();
     private final Map<String, AudioTrack> tracks = new ConcurrentHashMap<>();
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean closed = new AtomicBoolean(false);
@@ -201,11 +202,13 @@ public final class LavaPlayerEngine {
         if (source == null) throw new IllegalArgumentException("That queued track expired. Search for it again.");
         AudioPlayer player = players.computeIfAbsent(guildId, ignored -> manager.createPlayer());
         player.setVolume(Math.max(0, Math.min(1000, volume)));
+        startingAt.put(guildId, System.nanoTime());
         player.playTrack(source.makeClone());
         return "OK";
     }
 
     private String stop(long guildId) {
+        startingAt.remove(guildId);
         AudioPlayer player = players.get(guildId);
         if (player != null) player.stopTrack();
         return "OK";
@@ -225,7 +228,16 @@ public final class LavaPlayerEngine {
 
     private String frame(long guildId) {
         AudioPlayer player = players.get(guildId);
-        if (player == null || player.getPlayingTrack() == null) return "IDLE";
+        if (player == null) return "IDLE";
+        if (player.getPlayingTrack() == null) {
+            Long started = startingAt.get(guildId);
+            if (started == null) return "IDLE";
+            if (System.nanoTime() - started < TimeUnit.SECONDS.toNanos(15)) return "WAIT";
+            startingAt.remove(guildId, started);
+            System.err.printf("[lavaplayer] guild %d produced no track within 15 seconds%n", guildId);
+            return "IDLE";
+        }
+        startingAt.remove(guildId);
         ByteBuffer buffer = ByteBuffer.allocate(4096);
         MutableAudioFrame frame = new MutableAudioFrame();
         frame.setBuffer(buffer);
@@ -237,6 +249,7 @@ public final class LavaPlayerEngine {
     }
 
     private String destroy(long guildId) {
+        startingAt.remove(guildId);
         AudioPlayer player = players.remove(guildId);
         if (player != null) {
             player.destroy();
@@ -265,6 +278,7 @@ public final class LavaPlayerEngine {
         }
         players.values().forEach(AudioPlayer::destroy);
         players.clear();
+        startingAt.clear();
         manager.shutdown();
         clients.shutdown();
         try {
