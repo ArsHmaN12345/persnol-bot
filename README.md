@@ -38,6 +38,10 @@ Set Railway variables:
 
 Add a Railway Volume mounted at `/data` to persist bot data and local music files across redeploys. Use the Railway service logs to confirm Java engine startup and Discord login. Run `/musicdiag` in Discord to check music sources.
 
+### Private GHCR image
+
+The `Publish private GHCR image` workflow builds the root Dockerfile and publishes `ghcr.io/arshman12345/persnol-bot:latest` on updates to `main`. The image is linked to this repository and is intended to remain private. In Railway, connect that image and add a GitHub classic personal access token with only `read:packages` under Registry Credentials. Railway requires a Pro plan for private registry credentials. Never put the token in the repository or Discord.
+
 ## Docker Compose
 
 Copy `.env.example` to `.env`, fill in required credentials, then run `docker compose up -d --build`. Compose mounts `./storage` at `/app/storage` for persistent data and local media.
