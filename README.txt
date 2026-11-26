@@ -1,97 +1,52 @@
-=== RUN ON YOUR WINDOWS PC ===
-1. pip install -r requirements.txt
-2. Set DISCORD_TOKEN and OWNER_ID in your environment.
-3. Run Lavalink 4.2+ and configure LAVALINK_HOST, LAVALINK_PORT, and LAVALINK_PASSWORD.
-4. Install FFmpeg only if you use AI voice-message commands.
-5. Optional AI chat: set GEMINI_API_KEY. Run `python main.py`.
+# Personal Discord Bot
 
-Music playback and song search require Lavalink; direct FFmpeg playback is not supported.
-Run `/musicdiag` to check Lavalink connectivity and search sources.
+This bot combines a Python `discord.py` Discord client with an embedded Java **Lavaplayer** audio engine. The Java engine runs in the same process container, bound to loopback only. No Lavalink server or separate Railway audio service is used.
 
-=== ACCESS ===
-Owner = full control. Trusted users = music, moveall, party, mute/deafen, AI. Everyone else is ignored.
-  /trust @user   /untrust @user   /trusted      (CMD: trust / untrust / trusted)
-Owner only: drag/autodc/automute, kick/ban/unban/timeout, /jtc setup, roulette, trust.
+## Music features
 
-=== SLASH COMMANDS (also work as !text commands) ===
-Music:  /join (stays 24/7) /play /skip /pause /resume /stop /queue /nowplaying /volume /loop /shuffle /remove /leave
-Voice:  /moveall (asks where) /party /mute /unmute /deafen /undeafen /automute /automutes
-Drag:   /setchannels /drag /autodc /undrag /undragall /targets /dragdelay [seconds]
-Mod:    /kick /ban /unban /banlist /timeout /untimeout /timeouts
-Rooms:  /jtc setup | settings | status | panel | disable    /voice <name|limit|privacy|waiting|chat|trust|...>
-AI:     /ai <anything>   /voicecmd <audio>   /aichannel   /aireset   or  @mention the bot   or  'ai ...' in CMD
-Other:  /status  /roulette  /botstatus  /musicdiag
-Slash commands sync to every server automatically on start (CMD: 'sync' to force it).
+- Search and playback with `/play`; queue controls include `/skip`, `/pause`, `/resume`, `/stop`, `/queue`, `/nowplaying`, `/volume`, `/loop`, `/shuffle`, `/remove`, and `/leave`.
+- Lavaplayer sources: YouTube, SoundCloud, Bandcamp, Vimeo, Twitch streams, local files, and HTTP URLs. Availability can depend on provider changes and region.
+- Supported media includes MP3, FLAC, WAV, Matroska/WebM (AAC, Opus, Vorbis), MP4/M4A (AAC), OGG (Opus, Vorbis, FLAC), AAC, plus M3U/PLS stream playlists.
+- Spotify links use Spotify's Web API to read track metadata, then search for playable audio through configured Lavaplayer sources. Spotify audio itself is not streamed.
+- `/musicdiag` checks Java IPC, configured search sources, local music directory, and FFmpeg status.
+- `AUDIO_BITRATE=256` asks Discord to set the connected voice channel to 256 kbps. Discord caps this to the server's available limit, and the bot needs **Manage Channels** to change it.
 
-=== BOT PERMISSIONS ===
-Manage Channels, Manage Roles, Move Members, Mute Members, Deafen Members, Kick Members, Ban Members,
-Moderate Members, Connect, Speak, View Channels, Send Messages, Embed Links, Use Slash Commands.
-Developer Portal: enable Server Members Intent + Message Content Intent, turn OFF "Public Bot".
+## Run locally
 
-=== BOT STATUS ===
-/botstatus state:<online|idle|dnd|invisible> activity:<playing|listening|watching|competing|streaming|none> text:<...>
-  - no options = show the current status;  reset:true = back to default.  Owner only, saved across restarts.
-  - text accepts live placeholders {servers} {members} {ping} (refreshed every 5 minutes).
-  - streaming needs a Twitch/YouTube link in url.  Bots can't use Discord's "custom status".
-  - music: auto (a song shows only if you set no activity) / true (song always shows while playing) / false (never).
-  CMD: botstatus dnd watching over the server      botstatus reset
-  AI:  "set your status to idle and watching the server"
+Requirements: Python 3.12+, Java 17+, Maven 3.9+, and a Discord bot token. FFmpeg is needed for AI voice-message commands.
 
-=== VOICE ROOMS (join-to-create, TempVoice-style) ===
-/jtc setup creates the hub + an animated control panel (or pass your own channels). Members join the hub and
-get their own room + a live "room card". The interface has 18 buttons:
-  NAME  LIMIT  PRIVACY  WAITING ROOM  CHAT | TRUST  UNTRUST  INVITE  KICK  REGION
-  BLOCK  UNBLOCK  CLAIM  TRANSFER  DELETE  | BITRATE  INFO  SAVE
-Same things as commands: /voice name | limit | privacy | waiting | chat | bitrate | region | trust | untrust |
-  invite | kick | block | unblock | transfer | claim | info | save | reset | delete
-- Privacy: lock / unlock / invisible / visible.   Chat: open / close / clear.
-- Waiting room: a second channel; when someone joins it the owner gets Let in / Deny / Block buttons.
-- Trust / Block lists and SAVE'd settings follow the owner into every future room.
-- Invite DMs a join link.  Region picker.  Owner leaves -> room passes to someone inside.
-Admin: /jtc setup | settings | status | panel | disable.  config.py: JTC_ALLOW_EVERYONE = False limits rooms
-to owner + trusted.  Bot needs Manage Channels, Manage Roles, Move Members, Manage Messages (clear chat).
+1. Set `DISCORD_TOKEN` and `OWNER_ID` in the environment (or copy `.env.example` to `.env` for Docker).
+2. Build the engine: `cd java-engine` then `mvn -DskipTests package`.
+3. From the repository root, install Python dependencies with `pip install -r requirements.txt`.
+4. Run `python main.py`.
 
-=== AI ===
-Powered by Google Gemini. Set GEMINI_API_KEY. It can run music, voice and (for the owner) moderation
-tools. Kick / ban / timeout / trust changes ALWAYS ask for a confirm button first.
+Place local media under `storage/music` and use `local:filename.mp3` with `/play`. Relative paths are confined to that folder.
 
-=== 24/7 IN VOICE ===
-/join [channel]  -> bot joins (your channel by default) and STAYS: never leaves when idle, rejoins after a
-restart or disconnect, and moves back if someone drags it away. /join stay:false = normal. /leave turns it off.
-CMD: join <channel> [temp]. Saved in data.json (use a Railway Volume so it survives redeploys).
+Optional Spotify metadata lookup uses `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`. Optional AI features use `GEMINI_API_KEY`.
 
-=== VOICE COMMANDS (any language) ===
-Record a Discord VOICE MESSAGE (mic button in the text box) and send it:
-  - in the CHAT OF THE VOICE CHANNEL the bot is in (open the voice channel's chat panel; no setup needed), or
-  - in the AI channel (set with /aichannel #channel) - owner/trusted only, no mention needed, or
-  - with /voicecmd (attach audio), or with an @mention + audio file.
-The bot converts it with ffmpeg and Gemini understands it directly, then acts like you typed it and replies
-in your language. Audio is sent to Google for that one request and is not stored by the bot.
-(Live listening inside a voice channel is NOT included: Discord's end-to-end voice encryption blocks it
- with current libraries.)
+## Deploy on Railway
 
-=== LAVALINK (required music server) ===
-Lavalink is a Java audio server. This bot requires Lavalink 4.2+ for music playback and search.
-The server files are in the lavalink/ folder. Run `/musicdiag` to check connectivity and search sources.
-Railway (a SECOND service in the same project):
-  1. New -> GitHub repo (same repo) -> Settings -> Root Directory = /lavalink, and name the service  lavalink
-  2. lavalink service Variables:  LAVALINK_SERVER_PASSWORD = <long random password>
-  3. Bot service Variables:  LAVALINK_HOST = lavalink.railway.internal   LAVALINK_PORT = 2333
-                             LAVALINK_PASSWORD = <the same password>
-  4. Redeploy the bot.  /status shows "Music engine: Lavalink ✅".
-VPS: docker compose up -d --build  (starts both).  PC: run Lavalink yourself, then set the same variables.
-MUSIC_BACKEND = lavalink
-Sources: LAVALINK_SEARCH = ytsearch,scsearch  (SoundCloud is the fallback when YouTube is blocked).
-If YouTube blocks the server ("Sign in to confirm you're not a bot"): in lavalink/application.yml enable
-oauth or pot (throwaway Google account!), or rely on SoundCloud.  Lavalink needs ~512 MB RAM.
+Deploy the repository root as a single service. Railway builds the root `Dockerfile`, which compiles the Lavaplayer JAR and packages it with Python and Java. There is no Lavalink service to create.
 
-=== HOST ON RAILWAY ===
-1. Put this folder in a PRIVATE GitHub repo (.gitignore keeps .env / data.json out).
-2. Railway -> New Project -> Deploy from GitHub repo (builds the Dockerfile).
-3. Variables:  DISCORD_TOKEN, OWNER_ID, GEMINI_API_KEY, DATA_FILE=/data/data.json,
-   (optional) SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
-4. Add a Volume mounted at /data  (keeps trust list, targets, voice rooms across deploys)
-5. Logs should show "Logged in as ..." and "running headless" (normal on Railway).
+Set Railway variables:
 
-=== LINUX VPS (Docker) ===
-cp .env.example .env  (edit)  ->  docker compose up -d --build
+- `DISCORD_TOKEN`
+- `OWNER_ID`
+- `DATA_FILE=/data/data.json`
+- `AUDIO_LOCAL_DIR=/data/music`
+- Optional: `GEMINI_API_KEY`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`
+
+Add a Railway Volume mounted at `/data` to persist bot data and local music files across redeploys. Use the Railway service logs to confirm Java engine startup and Discord login. Run `/musicdiag` in Discord to check music sources.
+
+## Docker Compose
+
+Copy `.env.example` to `.env`, fill in required credentials, then run `docker compose up -d --build`. Compose mounts `./storage` at `/app/storage` for persistent data and local media.
+
+## Credentials and safety
+
+Keep bot tokens and API secrets in environment variables or Railway Variables. Do not commit `.env`. The Java IPC listener binds to `127.0.0.1` and is not exposed publicly. Local-file playback is restricted to `AUDIO_LOCAL_DIR`.
+
+## Other bot features
+
+The bot also includes voice channel management, moderation, persistent 24/7 voice presence, slash and console commands, and optional Gemini-powered chat and voice-message commands. Review the command descriptions in Discord and `config.py` for feature settings.
+

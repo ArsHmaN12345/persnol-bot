@@ -1,4 +1,4 @@
-"""Lavalink-backed music playback, queue controls, and voice presence."""
+"""Direct Lavaplayer-backed music playback, queue controls, and voice presence."""
 import asyncio
 import base64
 import collections
@@ -30,16 +30,14 @@ class MusicError(BotError):
     pass
 
 
-def _lavalink():
-    from modules import lavalink
+def _lavaplayer():
+    from modules import lavaplayer
 
-    node = lavalink.NODE
-    if node is None:
-        raise MusicError("Music needs Lavalink. Configure LAVALINK_HOST, LAVALINK_PORT, and LAVALINK_PASSWORD.")
-    if not node.ready:
-        detail = f" ({node.last_error})" if node.last_error else ""
-        raise MusicError(f"Lavalink isn't connected yet{detail}. Check the Lavalink Railway service.")
-    return lavalink
+    engine = lavaplayer.ENGINE
+    if not engine.ready:
+        detail = f" ({engine.last_error})" if engine.last_error else ""
+        raise MusicError(f"The local Java Lavaplayer engine isn't ready yet{detail}.")
+    return lavaplayer
 
 
 def fmt(seconds):
@@ -77,7 +75,7 @@ class Track:
         self.query = query
 
 
-def track_from_lavalink(item, requester):
+def track_from_engine(item, requester):
     return Track(
         item.get("title"),
         requester,
@@ -150,12 +148,12 @@ def spotify_tracks(kind, identifier):
 
 
 async def expand(query, requester):
-    """Resolve a song search, supported link, or Spotify playlist through Lavalink."""
+    """Resolve a song search, supported link, or Spotify playlist through Lavaplayer."""
     query = query.strip().strip("<>")
     if not query:
         raise MusicError("Enter a song name or a supported music link.")
 
-    lv = _lavalink()
+    lv = _lavaplayer()
     match = SPOTIFY_RE.search(query)
     if match:
         loop = asyncio.get_running_loop()
@@ -165,7 +163,7 @@ async def expand(query, requester):
         async def resolve_spotify(title, artist):
             async with semaphore:
                 results = await lv.NODE.search(f"{title} {artist}")
-            return track_from_lavalink(results[0], requester) if results else None
+            return track_from_engine(results[0], requester) if results else None
 
         resolved = await asyncio.gather(
             *(resolve_spotify(title, artist) for title, artist in pairs),
@@ -176,17 +174,17 @@ async def expand(query, requester):
             error = next((item for item in resolved if isinstance(item, Exception)), None)
             if error:
                 raise MusicError(str(error))
-            raise MusicError("Lavalink couldn't find playable matches for that Spotify link.")
+            raise MusicError("Lavaplayer couldn't find playable matches for that Spotify link.")
         return tracks[:config.MAX_QUEUE]
 
-    if query.startswith(("http://", "https://")):
+    if query.startswith(("http://", "https://", "local:")):
         results = await lv.NODE.resolve(query)
     else:
         results = await lv.NODE.search(query)
         results = results[:1]
     if not results:
         raise MusicError("No playable results found. Try another search or link.")
-    return [track_from_lavalink(item, requester) for item in results[:config.MAX_QUEUE]]
+    return [track_from_engine(item, requester) for item in results[:config.MAX_QUEUE]]
 
 
 def volume_embed(player):
@@ -222,7 +220,7 @@ def np_embed(player, track):
     embed.add_field(name="In queue", value=str(len(player.queue)), inline=True)
     embed.add_field(name="Volume", value=f"`{bar(player.volume)}`  **{int(player.volume * 100)}%**")
     loop = {"off": "off", "track": "🔂 track", "queue": "🔁 queue"}[player.loop_mode]
-    embed.set_footer(text=f"Loop: {loop} • Lavalink")
+    embed.set_footer(text=f"Loop: {loop} • Lavaplayer")
     return embed
 
 
@@ -314,6 +312,7 @@ class GuildPlayer:
         if not (voice.is_playing() or voice.is_paused()):
             raise MusicError("Nothing is playing.")
         self.skipped = True
+        asyncio.create_task(_lavaplayer().ENGINE.stop(self.guild.id))
         voice.stop()
 
     def pause(self):
@@ -321,19 +320,23 @@ class GuildPlayer:
         if not voice.is_playing():
             raise MusicError("Nothing is playing.")
         voice.pause()
+        asyncio.create_task(_lavaplayer().ENGINE.pause(self.guild.id, True))
 
     def resume(self):
         voice = self._vc()
         if not voice.is_paused():
             raise MusicError("Nothing is paused.")
+        asyncio.create_task(_lavaplayer().ENGINE.pause(self.guild.id, False))
         voice.resume()
 
     def toggle_pause(self):
         voice = self._vc()
         if voice.is_paused():
+            asyncio.create_task(_lavaplayer().ENGINE.pause(self.guild.id, False))
             voice.resume()
         elif voice.is_playing():
             voice.pause()
+            asyncio.create_task(_lavaplayer().ENGINE.pause(self.guild.id, True))
         else:
             raise MusicError("Nothing is playing.")
 
@@ -342,6 +345,8 @@ class GuildPlayer:
         self.loop_mode = "off"
         self.skipped = True
         voice = self.guild.voice_client
+        if self.current:
+            asyncio.create_task(_lavaplayer().ENGINE.stop(self.guild.id))
         if voice and (voice.is_playing() or voice.is_paused()):
             voice.stop()
 
@@ -349,9 +354,8 @@ class GuildPlayer:
         if not 0 <= percent <= 200:
             raise MusicError("Volume must be between 0 and 200.")
         self.volume = percent / 100
-        voice = self.guild.voice_client
-        if voice and hasattr(voice, "set_volume_percent"):
-            voice.set_volume_percent(percent)
+        if self.current:
+            asyncio.create_task(_lavaplayer().ENGINE.volume(self.guild.id, percent))
 
     def bump_volume(self, delta):
         self.set_volume(max(0, min(200, round(self.volume * 100) + delta)))
@@ -410,9 +414,9 @@ class GuildPlayer:
                         await self.destroy()
                         return
 
-                from modules import lavalink
+                from modules import lavaplayer
 
-                if lavalink.NODE is None or not lavalink.NODE.ready:
+                if not lavaplayer.ENGINE.ready:
                     await asyncio.sleep(5)
                     continue
 
@@ -439,12 +443,12 @@ class GuildPlayer:
                     loop.call_soon_threadsafe(event.set)
 
                 try:
-                    lv = _lavalink()
-                    await lv.resolve_track(track, voice.node)
-                    await voice.play_track(track, int(self.volume * 100), after)
+                    lv = _lavaplayer()
+                    await lv.ENGINE.play(self.guild.id, track.encoded, int(self.volume * 100))
+                    voice.play(lv.LavaPlayerAudioSource(lv.ENGINE, self.guild.id), after=after)
                 except BotError as error:
                     self.current = None
-                    if lavalink.NODE is None or not lavalink.NODE.ready:
+                    if not lavaplayer.ENGINE.ready:
                         self.queue.appendleft(track)
                         await asyncio.sleep(5)
                         continue
@@ -472,9 +476,7 @@ class GuildPlayer:
                 await self.end_panel()
                 self.current = None
                 voice = self.guild.voice_client
-                if self.next_error and str(self.next_error) == "lavalink connection lost":
-                    self.queue.appendleft(track)
-                elif (
+                if (
                     not self.skipped
                     and str(self.guild.id) in data["stay"]
                     and (voice is None or not voice.is_connected())
@@ -499,6 +501,11 @@ class GuildPlayer:
         await self.set_presence(None)
         self.cog.players.pop(self.guild.id, None)
         voice = self.guild.voice_client
+        try:
+            from modules import lavaplayer
+            await lavaplayer.ENGINE.destroy_player(self.guild.id)
+        except (ImportError, BotError):
+            pass
         if voice:
             try:
                 await voice.disconnect()
@@ -611,12 +618,20 @@ class Music(BaseCog):
         return player
 
     async def connect(self, guild, channel):
-        lv = _lavalink()
+        _lavaplayer()
         permissions = channel.permissions_for(guild.me)
         if not (permissions.view_channel and permissions.connect):
             raise MusicError(f"I need View Channel and Connect permission for {channel.name}.")
         if not permissions.speak:
             raise MusicError(f"I need Speak permission in {channel.name}.")
+        target_bitrate = min(config.AUDIO_BITRATE * 1000, int(guild.bitrate_limit))
+        if permissions.manage_channels and channel.bitrate != target_bitrate:
+            try:
+                await channel.edit(bitrate=target_bitrate, reason="Set bot music voice bitrate target")
+            except discord.Forbidden:
+                print(f"[music] couldn't set {channel.name} to {target_bitrate // 1000} kbps")
+            except discord.HTTPException as error:
+                print(f"[music] couldn't update voice-channel bitrate: {error}")
         voice = guild.voice_client
         already_connected = voice and voice.is_connected()
         if (not already_connected or voice.channel.id != channel.id) and channel.user_limit:
@@ -632,13 +647,7 @@ class Music(BaseCog):
             except (discord.HTTPException, asyncio.TimeoutError) as error:
                 raise MusicError(f"Couldn't clear the stale voice connection ({type(error).__name__}).")
         try:
-            await channel.connect(
-                cls=lv.LavalinkVoiceClient,
-                self_deaf=True,
-                timeout=20,
-            )
-        except lv.LavalinkError as error:
-            raise MusicError(str(error))
+            await channel.connect(self_deaf=True, timeout=20)
         except (discord.ClientException, discord.HTTPException, asyncio.TimeoutError) as error:
             raise MusicError(f"Couldn't join that voice channel ({type(error).__name__}).")
 
@@ -748,7 +757,7 @@ class Music(BaseCog):
         try:
             tracks = await asyncio.wait_for(expand(query, ctx.author.display_name), timeout=60)
         except asyncio.TimeoutError:
-            raise MusicError("Music search timed out. Check the Lavalink service and try again.")
+            raise MusicError("Music search timed out. Check the local Java engine and try again.")
         added = player.add(tracks)
         if added == 0:
             raise MusicError("The queue is full.")
@@ -854,12 +863,12 @@ class Music(BaseCog):
         embed = discord.Embed(
             title="🎵 Music commands",
             color=BLURPLE,
-            description="Search and play music through the configured Lavalink server.",
+            description="Search and play music with direct Lavaplayer playback.",
         )
         embed.add_field(name="Play", value=f"`{prefix}play <name or link>`\n`{prefix}queue`  `{prefix}nowplaying`", inline=False)
         embed.add_field(name="Control", value=f"`{prefix}skip`  `{prefix}pause`  `{prefix}resume`  `{prefix}stop`  `{prefix}leave`", inline=False)
         embed.add_field(name="Tune", value=f"`{prefix}volume <0-200>`  `{prefix}loop off|track|queue`\n`{prefix}shuffle`  `{prefix}remove <number>`", inline=False)
-        embed.add_field(name="Setup", value="`/musicdiag` checks the Lavalink connection.", inline=False)
+        embed.add_field(name="Setup", value="`/musicdiag` checks the local Java music engine.", inline=False)
         embed.set_footer(text="Use the buttons under Now Playing for quick controls.")
         await ctx.send(embed=embed)
 
@@ -999,9 +1008,10 @@ async def c_hq(bot, args):
         print("Join a voice channel first.")
         return
     try:
-        bitrate = int(guild.bitrate_limit)
+        bitrate = min(config.AUDIO_BITRATE * 1000, int(guild.bitrate_limit))
         await voice.channel.edit(bitrate=bitrate)
-        print(f"Channel bitrate set to {bitrate // 1000} kbps.")
+        print(f"Channel bitrate set to {bitrate // 1000} kbps." +
+              (" (Discord server limit is below the 256 kbps target.)" if bitrate < 256000 else ""))
     except discord.Forbidden:
         print("[!] The bot needs Manage Channels permission to change the bitrate.")
 
@@ -1011,7 +1021,7 @@ async def setup(bot):
     add = bot.add_console
     add("join", c_join, "join <channel> [temp]", "join a voice channel and stay 24/7", group=GROUP)
     add("leave", c_leave, "leave", "bot leaves voice", group=GROUP)
-    add("play", c_play, "play <name or link>", "search and play through Lavalink", aliases=("p",), group=GROUP)
+    add("play", c_play, "play <name or link>", "search and play through Lavaplayer", aliases=("p",), group=GROUP)
     add("skip", c_skip, "skip", "skip the current track", group=GROUP)
     add("pause", c_pause, "pause", "pause playback", group=GROUP)
     add("resume", c_resume, "resume", "resume playback", group=GROUP)
@@ -1027,3 +1037,4 @@ async def setup(bot):
 
 async def teardown(bot):
     bot.remove_console_group(GROUP)
+

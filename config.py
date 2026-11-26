@@ -13,7 +13,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "958101166896582666"))   # the ONLY person 
 DRAG_DELAY = 1.5            # seconds between moves (keep >= 1)
 
 # ---------- MUSIC MODULE ----------
-AUDIO_BITRATE = 256         # kbps Opus target (automatically capped to the voice channel's bitrate)
+AUDIO_BITRATE = int(os.getenv("AUDIO_BITRATE", "256"))  # channel bitrate target in kbps; capped by Discord
 DEFAULT_VOLUME = 0.5        # 0.0 - 2.0
 MAX_QUEUE = 300
 IDLE_TIMEOUT = 300          # seconds of empty queue before the bot leaves voice
@@ -25,13 +25,11 @@ SET_PRESENCE = True         # show "Listening to <song>" on the bot's profile
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 
-# Music requires a Lavalink server.
-MUSIC_BACKEND = os.getenv("MUSIC_BACKEND", "lavalink").strip().lower()
-LAVALINK_HOST = os.getenv("LAVALINK_HOST", "")
-LAVALINK_PORT = int(os.getenv("LAVALINK_PORT", "2333"))
-LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD", "")
-LAVALINK_SECURE = os.getenv("LAVALINK_SECURE", "false").strip().lower() in ("1", "true", "yes", "on")
-LAVALINK_SEARCH = os.getenv("LAVALINK_SEARCH", "scsearch,ytsearch")
+# The Java process runs locally in the same container and uses Lavaplayer directly.
+LAVAPLAYER_ENGINE_PORT = int(os.getenv("LAVAPLAYER_ENGINE_PORT", "8765"))
+LAVAPLAYER_ENGINE_JAR = os.getenv("LAVAPLAYER_ENGINE_JAR", "java-engine/target/lavaplayer-engine-1.0.0.jar")
+LAVAPLAYER_SEARCH = [p.strip() for p in os.getenv("LAVAPLAYER_SEARCH", "ytsearch,scsearch").split(",") if p.strip()]
+AUDIO_LOCAL_DIR = os.getenv("AUDIO_LOCAL_DIR", "storage/music")
 
 # ---------- JOIN-TO-CREATE ----------
 JTC_ALLOW_EVERYONE = True   # True = any server member can make/use their own temp room
@@ -47,3 +45,4 @@ AI_COOLDOWN = 4             # seconds between AI requests per user
 AI_MAX_STEPS = 6            # max tool-calling rounds per request
 AI_HISTORY_TURNS = 6        # how many past exchanges the AI remembers per user
 AI_MENTION = True           # @mention the bot to talk to the AI (owner/trusted only)
+
