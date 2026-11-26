@@ -4,7 +4,7 @@ COPY java-engine/pom.xml ./pom.xml
 COPY java-engine/src ./src
 RUN mvn -B -DskipTests package
 
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 # FFmpeg decodes audio attachments for the AI voice-command feature.
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates openjdk-17-jre-headless \
