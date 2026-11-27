@@ -6,7 +6,6 @@
   "engines": { "node": ">=22" },
   "scripts": { "start": "node src/index.js" },
   "dependencies": {
-    "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.18.0",
     "discord.js": "^14.19.3",
     "dotenv": "^16.4.7"

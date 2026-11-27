@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, Routes } from 'discord.js';
-import { AudioPlayerStatus, NoSubscriberBehavior, createAudioPlayer, createAudioResource, entersState, joinVoiceChannel, VoiceConnectionStatus } from '@discordjs/voice';
+import { AudioPlayerStatus, NoSubscriberBehavior, StreamType, createAudioPlayer, createAudioResource, entersState, joinVoiceChannel, VoiceConnectionStatus } from '@discordjs/voice';
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) throw new Error('DISCORD_TOKEN is required');
@@ -56,11 +56,10 @@ async function start(guild, session) {
     const input = await runYtdlp(['--no-warnings', '--get-url', '--format', 'bestaudio/best', '--no-playlist', track.url]);
     const mediaUrl = input.split(/\r?\n/)[0];
     if (!/^https?:\/\//.test(mediaUrl)) throw new Error('Extractor did not return a valid HTTP audio stream.');
-    ffmpeg = spawn('ffmpeg', ['-nostdin', '-hide_banner', '-loglevel', 'warning', '-i', mediaUrl, '-vn', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    ffmpeg = spawn('ffmpeg', ['-nostdin', '-hide_banner', '-loglevel', 'warning', '-i', mediaUrl, '-vn', '-c:a', 'libopus', '-application', 'audio', '-frame_duration', '20', '-ar', '48000', '-ac', '2', '-f', 'ogg', 'pipe:1'], { stdio: ['ignore', 'pipe', 'pipe'] });
     let diagnostic = '';
     ffmpeg.stderr.setEncoding('utf8').on('data', part => diagnostic += part);
-    const resource = createAudioResource(ffmpeg.stdout, { inputType: 'raw', inlineVolume: true, metadata: track });
-    resource.volume.setVolume(Math.max(0, Math.min(2, session.volume)));
+    const resource = createAudioResource(ffmpeg.stdout, { inputType: StreamType.OggOpus, metadata: track });
     ffmpeg.on('error', error => console.error(`[music] ffmpeg spawn failed: ${error.message}`));
     ffmpeg.on('close', code => { if (code && session.current === track) console.error(`[music] ffmpeg exited ${code}: ${diagnostic.slice(-500)}`); });
     session.audio.play(resource);
