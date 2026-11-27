@@ -230,6 +230,7 @@ class GuildPlayer:
         self.guild = guild
         self.queue = collections.deque()
         self.current = None
+        self.source = None
         self.volume = config.DEFAULT_VOLUME
         self.loop_mode = "off"
         self.skipped = False
@@ -435,17 +436,21 @@ class GuildPlayer:
                 self.skipped = False
                 self.next_event.clear()
                 self.next_error = None
+                self.source = None
 
                 def after(error, event=self.next_event):
                     if error:
                         print(f"[music] playback ended with an error: {error}")
                         self.next_error = error
+                    if self.source:
+                        print(f"[music] audio source ended: {self.source.stats()}")
                     loop.call_soon_threadsafe(event.set)
 
                 try:
                     lv = _lavaplayer()
                     await lv.ENGINE.play(self.guild.id, track.encoded, int(self.volume * 100))
-                    voice.play(lv.LavaPlayerAudioSource(lv.ENGINE, self.guild.id), after=after)
+                    self.source = lv.LavaPlayerAudioSource(lv.ENGINE, self.guild.id)
+                    voice.play(self.source, after=after)
                 except BotError as error:
                     self.current = None
                     if not lavaplayer.ENGINE.ready:
@@ -475,6 +480,7 @@ class GuildPlayer:
 
                 await self.end_panel()
                 self.current = None
+                self.source = None
                 voice = self.guild.voice_client
                 if (
                     not self.skipped

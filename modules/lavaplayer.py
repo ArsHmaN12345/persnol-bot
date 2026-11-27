@@ -208,15 +208,32 @@ class LavaPlayerAudioSource(discord.AudioSource):
         self.engine = engine
         self.guild_id = guild_id
         self.closed = False
+        self.opus_frames = 0
+        self.silence_frames = 0
+        self.end_frames = 0
+        self.read_errors = 0
 
     def read(self):
         if self.closed:
             return b""
         try:
-            return self.engine.next_frame(self.guild_id)
+            frame = self.engine.next_frame(self.guild_id)
+            if frame == b"":
+                self.end_frames += 1
+            elif frame == b"\xf8\xff\xfe":
+                self.silence_frames += 1
+            else:
+                self.opus_frames += 1
+            return frame
         except LavaPlayerError as error:
-            print(f"[lavaplayer] frame read failed: {error}")
+            self.read_errors += 1
+            if self.read_errors == 1 or self.read_errors % 50 == 0:
+                print(f"[lavaplayer] frame read failed ({self.read_errors}): {error}")
             return b""
+
+    def stats(self):
+        return (f"Opus frames: {self.opus_frames}; startup-silence frames: {self.silence_frames}; "
+                f"end-of-stream frames: {self.end_frames}; IPC read errors: {self.read_errors}")
 
     def is_opus(self):
         return True
@@ -274,6 +291,19 @@ class LavaPlayerCog(BaseCog):
     async def musicdiag(self, ctx):
         async with ctx.typing():
             lines, _, ok = await run_diag(ctx.bot)
+        voice = ctx.guild.voice_client
+        lines.append(
+            f"{'✅' if voice and voice.is_connected() else '⚠️'} Discord voice: "
+            f"{'connected' if voice and voice.is_connected() else 'not connected'}; "
+            f"audio player: {'playing' if voice and voice.is_playing() else 'not playing'}."
+        )
+        cog = ctx.bot.get_cog("Music")
+        player = cog.players.get(ctx.guild.id) if cog else None
+        source = player.source if player else None
+        if source:
+            lines.append(f"🎧 Audio source: {source.stats()}.")
+        elif voice and voice.is_playing():
+            lines.append("⚠️ Discord reports playing audio, but no Lavaplayer source is tracked.")
         await ctx.send(embed=discord.Embed(
             title="🩺 Music check",
             description="\n".join(lines)[:4000],
