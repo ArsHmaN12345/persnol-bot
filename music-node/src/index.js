@@ -80,7 +80,7 @@ function connect(interaction, session) {
   if (!channel.permissionsFor(interaction.guild.members.me)?.has(['Connect', 'Speak'])) throw new Error('I need Connect and Speak permissions in your voice channel.');
   if (session.connection?.joinConfig.channelId !== channel.id) {
     session.connection?.destroy();
-    session.connection = joinVoiceChannel({ channelId: channel.id, guildId: interaction.guildId, adapterCreator: interaction.guild.voiceAdapterCreator, selfDeaf: true });
+    session.connection = joinVoiceChannel({ channelId: channel.id, guildId: interaction.guildId, adapterCreator: interaction.guild.voiceAdapterCreator, selfDeaf: true, debug: true });
     session.connection.on('stateChange', (oldState, newState) => console.log(`[music] voice ${oldState.status} -> ${newState.status} guild=${interaction.guildId}`));
     session.connection.on('error', error => console.error(`[music] voice error guild=${interaction.guildId}: ${error.message}`));
     session.connection.subscribe(session.audio);
@@ -110,6 +110,12 @@ client.once('ready', async bot => {
       .catch(error => console.error(`[commands] couldn't register music commands in ${guild.id}: ${error.message}`));
   }
 });
+client.on('voiceStateUpdate', (oldState, newState) => {
+  if (newState.id === client.user?.id) console.log(`[music] gateway voice state guild=${newState.guild.id} channel=${newState.channelId || 'left'} session=${newState.sessionId ? 'present' : 'missing'}`);
+});
+client.on('voiceServerUpdate', data => {
+  console.log(`[music] gateway voice server guild=${data.guild.id} endpoint=${data.endpoint || 'missing'} token=${data.token ? 'present' : 'missing'}`);
+});
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
   const session = playerFor(interaction.guild);
@@ -135,7 +141,19 @@ client.on('interactionCreate', async interaction => {
     else if (interaction.commandName === 'volume') { session.volume=interaction.options.getInteger('percent')/100; await interaction.reply(`Volume set to ${interaction.options.getInteger('percent')}%.`); }
     else if (interaction.commandName === 'loop') { session.loop=interaction.options.getString('mode'); await interaction.reply(`Loop: ${session.loop}.`); }
     else if (interaction.commandName === 'remove') { const removed=session.queue.splice(interaction.options.getInteger('position')-1,1); await interaction.reply(removed[0] ? `Removed ${removed[0].title}.` : 'No track at that position.'); }
-  } catch (error) { console.error(`[music] /${interaction.commandName}: ${error.stack || error}`); const message = `❌ ${error.message || 'Music command failed.'}`; if (interaction.deferred || interaction.replied) await interaction.editReply(message).catch(()=>{}); else await interaction.reply({content:message,ephemeral:true}).catch(()=>{}); }
+  } catch (error) {
+    console.error(`[music] /${interaction.commandName}: ${error.stack || error}`);
+    let message = `❌ ${error.message || 'Music command failed.'}`;
+    if (error.name === 'AbortError' || error.code === 'VOICE_CONNECTION_TIMEOUT') {
+      if (session.connection?.state.status !== VoiceConnectionStatus.Ready) {
+        session.connection?.destroy();
+        session.connection = null;
+      }
+      message = '❌ Discord voice did not finish connecting. Check the bot has Connect and Speak permissions, then retry.';
+    }
+    if (interaction.deferred || interaction.replied) await interaction.editReply(message).catch(()=>{});
+    else await interaction.reply({content:message,ephemeral:true}).catch(()=>{});
+  }
 });
 client.on('voiceStateUpdate', (oldState, newState) => { if (newState.id === client.user?.id && !newState.channelId) { const s=sessions.get(newState.guild.id); if(s) { s.connection=null; s.audio.stop(true); s.current=null; } } });
 client.on('error', error => console.error(`[discord] ${error.stack || error}`));
