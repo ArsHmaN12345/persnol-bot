@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { spawn } from 'node:child_process';
 import { readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, Routes } from 'discord.js';
+import { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder } from 'discord.js';
 import { AudioPlayerStatus, NoSubscriberBehavior, StreamType, createAudioPlayer, createAudioResource, entersState, joinVoiceChannel, VoiceConnectionStatus } from '@discordjs/voice';
 
 const token = process.env.DISCORD_TOKEN;
@@ -100,16 +100,14 @@ const choices = [
 ];
 client.once('ready', async bot => {
   console.log(`[bot] logged in as ${bot.user.tag}`);
-  // Upsert only music commands; bulk replacement would erase Python bot commands.
+  // Preserve other registered command definitions while replacing this player's commands.
   for (const guild of bot.guilds.cache.values()) {
     const existing = await guild.commands.fetch().catch(() => null);
-    for (const command of choices) {
-      const prior = existing?.find(item => item.name === command.name);
-      const route = prior ? Routes.applicationGuildCommand(bot.application.id, guild.id, prior.id) : Routes.applicationGuildCommands(bot.application.id, guild.id);
-      const method = prior ? 'PUT' : 'POST';
-      await bot.rest[method === 'PUT' ? 'put' : 'post'](route, { body: command.toJSON() })
-        .catch(error => console.error(`[commands] couldn't register /${command.name} in ${guild.id}: ${error.message}`));
-    }
+    const musicNames = new Set(choices.map(command => command.name));
+    const retained = existing ? [...existing.values()].filter(command => !musicNames.has(command.name)).map(command => command.toJSON()) : [];
+    await guild.commands.set([...retained, ...choices.map(command => command.toJSON())])
+      .then(() => console.log(`[commands] registered ${choices.length} music commands in ${guild.id}`))
+      .catch(error => console.error(`[commands] couldn't register music commands in ${guild.id}: ${error.message}`));
   }
 });
 client.on('interactionCreate', async interaction => {
