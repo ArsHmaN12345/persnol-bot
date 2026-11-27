@@ -85,7 +85,7 @@ function connect(interaction, session) {
     session.connection.on('error', error => console.error(`[music] voice error guild=${interaction.guildId}: ${error.message}`));
     session.connection.subscribe(session.audio);
   }
-  return entersState(session.connection, VoiceConnectionStatus.Ready, 20000);
+  return entersState(session.connection, VoiceConnectionStatus.Ready, 45000);
 }
 const choices = [
   new SlashCommandBuilder().setName('play').setDescription('Search or play a URL/local track').addStringOption(o => o.setName('query').setDescription('Song, supported URL, or local:filename').setRequired(true)),
@@ -100,6 +100,7 @@ const choices = [
 ];
 client.once('ready', async bot => {
   console.log(`[bot] logged in as ${bot.user.tag}`);
+  console.log(`[music] GuildVoiceStates intent=${client.options.intents.has(GatewayIntentBits.GuildVoiceStates) ? 'enabled' : 'MISSING'}`);
   // Preserve other registered command definitions while replacing this player's commands.
   for (const guild of bot.guilds.cache.values()) {
     const existing = await guild.commands.fetch().catch(() => null);
