@@ -212,6 +212,7 @@ class LavaPlayerAudioSource(discord.AudioSource):
         self.silence_frames = 0
         self.end_frames = 0
         self.read_errors = 0
+        self.first_frame = threading.Event()
 
     def read(self):
         if self.closed:
@@ -224,6 +225,7 @@ class LavaPlayerAudioSource(discord.AudioSource):
                 self.silence_frames += 1
             else:
                 self.opus_frames += 1
+                self.first_frame.set()
             return frame
         except LavaPlayerError as error:
             self.read_errors += 1
@@ -234,6 +236,9 @@ class LavaPlayerAudioSource(discord.AudioSource):
     def stats(self):
         return (f"Opus frames: {self.opus_frames}; startup-silence frames: {self.silence_frames}; "
                 f"end-of-stream frames: {self.end_frames}; IPC read errors: {self.read_errors}")
+
+    async def wait_for_frame(self, timeout=20):
+        return await asyncio.to_thread(self.first_frame.wait, timeout)
 
     def is_opus(self):
         return True

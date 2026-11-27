@@ -85,6 +85,10 @@ class DragBot(commands.Bot):
         self.tree.error(self.on_tree_error)
         for f in sorted(os.listdir("modules")):
             if f.endswith(".py") and not f.startswith("_"):
+                # Music is served by the parallel Node.js player in music-node.
+                if f in {"music.py", "lavaplayer.py"}:
+                    print(f"[module] skipped {f[:-3]} (Node music runtime owns playback)")
+                    continue
                 try:
                     await self.load_extension(f"modules.{f[:-3]}")
                     print(f"[module] loaded {f[:-3]}")

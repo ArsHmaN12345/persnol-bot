@@ -432,6 +432,15 @@ class GuildPlayer:
                     await asyncio.sleep(5)
                     continue
 
+                try:
+                    await asyncio.wait_for(voice.wait_until_connected(), timeout=20)
+                except (asyncio.TimeoutError, discord.DiscordException) as error:
+                    self.queue.appendleft(track)
+                    print(f"[music] voice connection not ready in guild {self.guild.id}: {type(error).__name__}: {error}")
+                    await self.say("❌ Voice connection isn't ready yet. I'll retry this track shortly.")
+                    await asyncio.sleep(5)
+                    continue
+
                 self.current = track
                 self.skipped = False
                 self.next_event.clear()
@@ -451,6 +460,16 @@ class GuildPlayer:
                     await lv.ENGINE.play(self.guild.id, track.encoded, int(self.volume * 100))
                     self.source = lv.LavaPlayerAudioSource(lv.ENGINE, self.guild.id)
                     voice.play(self.source, after=after)
+                    if not await self.source.wait_for_frame(20):
+                        stats = self.source.stats()
+                        print(f"[music] no audio frame for {track.title!r} in guild {self.guild.id}; {stats}")
+                        if voice.is_playing() or voice.is_paused():
+                            voice.stop()
+                        await lv.ENGINE.stop(self.guild.id)
+                        self.current = None
+                        self.source = None
+                        await self.say(f"❌ **{safe(track.title)}** didn't produce playable audio. Try another result or link.")
+                        continue
                 except BotError as error:
                     self.current = None
                     if not lavaplayer.ENGINE.ready:
@@ -465,8 +484,8 @@ class GuildPlayer:
                     print(f"[music] playback request failed: {type(error).__name__}: {error}")
                     continue
 
-                await self.set_status(config.VC_STATUS_TEMPLATE.format(title=track.title))
                 await self.announce(track)
+                await self.set_status(config.VC_STATUS_TEMPLATE.format(title=track.title))
                 while True:
                     try:
                         await asyncio.wait_for(self.next_event.wait(), 5)
