@@ -4,4 +4,5 @@ storage/
 __pycache__/
 *.pyc
 java-engine/target/
+java-bot/target/
 

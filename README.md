@@ -1,56 +1,39 @@
-# Personal Discord Bot
+# Personal Bot
 
-This bot combines a Python `discord.py` Discord client with an embedded Java **Lavaplayer** audio engine. The Java engine runs in the same process container, bound to loopback only. No Lavalink server or separate Railway audio service is used.
+The Railway image runs one Discord client: a Java 25 bot built with JDA 6 and Lavaplayer. The Python and previous Node implementations remain in the repository as inactive source for later work; the Docker image does not start them, so they cannot create a second Discord session.
 
 ## Music features
 
-- Search and playback with `/play`; queue controls include `/skip`, `/pause`, `/resume`, `/stop`, `/queue`, `/nowplaying`, `/volume`, `/loop`, `/shuffle`, `/remove`, and `/leave`.
-- Lavaplayer sources: YouTube, SoundCloud, Bandcamp, Vimeo, Twitch streams, local files, and HTTP URLs. Availability can depend on provider changes and region.
-- Supported media includes MP3, FLAC, WAV, Matroska/WebM (AAC, Opus, Vorbis), MP4/M4A (AAC), OGG (Opus, Vorbis, FLAC), AAC, plus M3U/PLS stream playlists.
-- Spotify links use Spotify's Web API to read track metadata, then search for playable audio through configured Lavaplayer sources. Spotify audio itself is not streamed.
-- `/musicdiag` checks Java IPC, configured search sources, local music directory, and FFmpeg status.
-- `AUDIO_BITRATE=256` asks Discord to set the connected voice channel to 256 kbps. Discord caps this to the server's available limit, and the bot needs **Manage Channels** to change it.
+- `/play` accepts a search, supported source URL, playlist, stream, or `local:filename`.
+- `/pause`, `/resume`, `/skip`, `/stop`, `/leave`, `/queue`, `/nowplaying`, `/shuffle`, `/clear`, `/remove`, `/seek`, `/volume`, `/loop`, and `/musicdiag`.
+- Lavaplayer sources include YouTube, SoundCloud, Bandcamp, Vimeo, Twitch, local files, and HTTP streams. Supported formats include MP3, FLAC, WAV, WebM/Matroska, MP4/M4A, OGG, AAC, M3U, and PLS.
+- Track announcements are posted only after Lavaplayer reports playback started. Load errors, track errors, stuck tracks, voice connection timeouts, and playback state are logged.
+- YouTube search works without an API key. Spotify track links resolve title and artist through Spotify's public oEmbed endpoint, then search a playable source; Spotify audio is not streamed. Spotify playlists/albums are not supported without a metadata API.
 
-## Run locally
+## Railway setup
 
-Requirements: Python 3.12+, Java 17+, Maven 3.9+, and a Discord bot token. FFmpeg is needed for AI voice-message commands.
+Build the repository root with the supplied `Dockerfile`. Set these Railway variables:
 
-1. Set `DISCORD_TOKEN` and `OWNER_ID` in the environment (or copy `.env.example` to `.env` for Docker).
-2. Build the engine: `cd java-engine` then `mvn -DskipTests package`.
-3. From the repository root, install Python dependencies with `pip install -r requirements.txt`.
-4. Run `python main.py`.
+- `DISCORD_TOKEN` — the existing Discord bot token.
+- `DISCORD_GUILD_ID` — optional; syncs slash commands immediately to that server. If omitted, commands sync globally and may take time to appear.
+- `AUDIO_LOCAL_DIR=/data/music` — local media directory.
 
-Place local media under `storage/music` and use `local:filename.mp3` with `/play`. Relative paths are confined to that folder.
+Mount a Railway volume at `/data` if you want uploaded local files to persist. Enable the bot's **Connect**, **Speak**, **View Channel**, and **Send Messages** permissions. Enable the **Server Members Intent** only if other application features need it; the Java music bot requests Guild Voice States. For 256 kbps audio, set the Discord voice channel bitrate to 256 kbps in the server settings and ensure the server tier permits it. The bot does not silently alter channel settings.
 
-Optional Spotify metadata lookup uses `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`. Optional AI features use `GEMINI_API_KEY`.
+The Java image includes JDA's DAVE implementation and Linux x86-64 native library, and is built on Java 25. Railway logs should show `[startup]`, `[commands]`, `[voice]`, and `[playback]` events. `/musicdiag` reports the current voice connection, player state, and queue depth.
 
-## Deploy on Railway
+## Local run
 
-Deploy the repository root as a single service. Railway builds the root `Dockerfile`, which compiles the Lavaplayer JAR and packages it with Python and Java. There is no Lavalink service to create.
+Requirements: Java 25 and Maven 3.9+. Set `DISCORD_TOKEN` (and optionally `DISCORD_GUILD_ID`) then run:
 
-Set Railway variables:
+```powershell
+cd java-bot
+mvn -DskipTests package
+java --enable-native-access=ALL-UNNAMED -jar target/personal-music-bot.jar
+```
 
-- `DISCORD_TOKEN`
-- `OWNER_ID`
-- `DATA_FILE=/data/data.json`
-- `AUDIO_LOCAL_DIR=/data/music`
-- Optional: `GEMINI_API_KEY`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`
+Put local tracks in `storage/music` and request them as `local:filename.mp3`.
 
-Add a Railway Volume mounted at `/data` to persist bot data and local music files across redeploys. Use the Railway service logs to confirm Java engine startup and Discord login. Run `/musicdiag` in Discord to check music sources.
+## Image publishing
 
-### Private GHCR image
-
-The `Publish private GHCR image` workflow builds the root Dockerfile and publishes `ghcr.io/arshman12345/persnol-bot:latest` on updates to `main`. The image is linked to this repository and is intended to remain private. In Railway, connect that image and add a GitHub classic personal access token with only `read:packages` under Registry Credentials. Railway requires a Pro plan for private registry credentials. Never put the token in the repository or Discord.
-
-## Docker Compose
-
-Copy `.env.example` to `.env`, fill in required credentials, then run `docker compose up -d --build`. Compose mounts `./storage` at `/app/storage` for persistent data and local media.
-
-## Credentials and safety
-
-Keep bot tokens and API secrets in environment variables or Railway Variables. Do not commit `.env`. The Java IPC listener binds to `127.0.0.1` and is not exposed publicly. Local-file playback is restricted to `AUDIO_LOCAL_DIR`.
-
-## Other bot features
-
-The bot also includes voice channel management, moderation, persistent 24/7 voice presence, slash and console commands, and optional Gemini-powered chat and voice-message commands. Review the command descriptions in Discord and `config.py` for feature settings.
-
+`.github/workflows/publish-ghcr.yml` builds and publishes `ghcr.io/arshman12345/persnol-bot:latest` from `main`. Railway can deploy the repository Dockerfile or the published image. Keep `DISCORD_TOKEN` in Railway Variables; never commit it.

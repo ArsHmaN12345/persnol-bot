@@ -12,6 +12,7 @@ on:
       - "config.py"
       - "modules/**"
       - "java-engine/**"
+      - "java-bot/**"
       - "music-node/**"
       - ".github/workflows/publish-ghcr.yml"
   workflow_dispatch:
